@@ -148,8 +148,11 @@ def determine_optimal_k(seqs, wt_seq, target_percentage=0.25, max_k=20, toleranc
     best_wt_percentage = 0
     best_diff = float('inf')
     
+    # Try different k values
     for k in range(2, min(max_k + 1, len(seqs))):
         km = KMeans(n_clusters=k, random_state=0, n_init=10).fit(X)
+        
+        # Find which cluster contains the wild-type sequence
         wt_cluster = int(km.predict([wt_encoded])[0])
         
         # Count sequences in each cluster
@@ -160,27 +163,17 @@ def determine_optimal_k(seqs, wt_seq, target_percentage=0.25, max_k=20, toleranc
         # Calculate how close we are to target percentage
         diff = abs(wt_percentage - target_percentage)
         
-        # Update best k if:
-        # 1. We're closer to target percentage than before
-        # 2. The percentage is within tolerance of target
-        # 3. The percentage is not too high (upper limit)
-        if (diff < best_diff and 
-            abs(wt_percentage - target_percentage) <= tolerance and
-            wt_percentage <= target_percentage + tolerance):
+        # Update best k if we're closer to target percentage
+        if diff < best_diff:
             best_k = k
             best_wt_percentage = wt_percentage
             best_diff = diff
             
-        # If we've found a perfect match, stop searching
-        if abs(wt_percentage - target_percentage) < 0.01:
-            break
+            # If we've found a perfect match within tolerance, stop searching
+            if diff <= tolerance:
+                break
     
-    if best_k == 1:
-        print(f"Warning: Could not find k value that achieves {target_percentage:.1%} ± {tolerance:.1%} sequences in WT cluster")
-        print(f"Using k=1 with {best_wt_percentage:.1%} sequences in WT cluster")
-    else:
-        print(f"Selected k={best_k} with {best_wt_percentage:.1%} sequences in WT cluster")
-    
+    print(f"Selected k={best_k} with {best_wt_percentage:.1%} sequences in WT cluster")
     return best_k
 
 
@@ -495,29 +488,29 @@ def run_augmentation():
     print(f"After removing duplicates: {len(seqs28_unique)} CD28 sequences and {len(seqs3z_unique)} CD3ζ sequences")
 
     # Filter by length
-    seqs28 = filter_by_length(seqs28_unique, len(wt28), args.tol)
-    seqs3z = filter_by_length(seqs3z_unique, len(wt3z), args.tol)
-    print(f"After length filtering: {len(seqs28)} CD28 sequences and {len(seqs3z)} CD3ζ sequences")
+    seqs28_filtered = filter_by_length(seqs28_unique, len(wt28), args.tol)
+    seqs3z_filtered = filter_by_length(seqs3z_unique, len(wt3z), args.tol)
+    print(f"After length filtering: {len(seqs28_filtered)} CD28 sequences and {len(seqs3z_filtered)} CD3ζ sequences")
 
     # Ensure wild-type sequences are in the datasets
-    if wt28 not in seqs28:
+    if wt28 not in seqs28_filtered:
         print("⚠️ Wild-type CD28 sequence not found in filtered results, adding it.")
-        seqs28.append(wt28)
-    if wt3z not in seqs3z:
+        seqs28_filtered.append(wt28)
+    if wt3z not in seqs3z_filtered:
         print("⚠️ Wild-type CD3ζ sequence not found in filtered results, adding it.")
-        seqs3z.append(wt3z)
+        seqs3z_filtered.append(wt3z)
 
     # Determine optimal K for clustering
-    k_cd28 = determine_optimal_k(seqs28, wt28, target_percentage=args.min_wt_percentage)
-    k_cd3z = determine_optimal_k(seqs3z, wt3z, target_percentage=args.min_wt_percentage)
+    k_cd28 = determine_optimal_k(seqs28_filtered, wt28, target_percentage=args.min_wt_percentage)
+    k_cd3z = determine_optimal_k(seqs3z_filtered, wt3z, target_percentage=args.min_wt_percentage)
 
     # Cluster sequences
-    clusters28, km28, wt_cluster28, X28 = cluster_and_assign_seqs(seqs28, k_cd28, wt28)
-    clusters3z, km3z, wt_cluster3z, X3z = cluster_and_assign_seqs(seqs3z, k_cd3z, wt3z)
+    clusters28, km28, wt_cluster28, X28 = cluster_and_assign_seqs(seqs28_filtered, k_cd28, wt28)
+    clusters3z, km3z, wt_cluster3z, X3z = cluster_and_assign_seqs(seqs3z_filtered, k_cd3z, wt3z)
 
     # Find wild-type index for plotting
-    wt_idx28 = seqs28.index(wt28)
-    wt_idx3z = seqs3z.index(wt3z)
+    wt_idx28 = seqs28_filtered.index(wt28)
+    wt_idx3z = seqs3z_filtered.index(wt3z)
     
     # Generate plots if requested
     if args.plot_clusters:
@@ -525,21 +518,25 @@ def run_augmentation():
         for plot_method in [args.plot_method]:
             method_suffix = "" if plot_method == 'kmeans' else f"_{plot_method}"
             
+            # Plot CD28 clusters
+            cd28_plot_path = plots_dir / f'cd28_clusters{method_suffix}.png'
             plot_clusters(
-                X28, 
-                km28.labels_, 
-                wt_idx28, 
-                f'CD28 Sequence Clusters (k={k_cd28})', 
-                plots_dir / f'cd28_clusters{method_suffix}.png',
+                X=X28, 
+                labels=km28.labels_, 
+                wt_idx=wt_idx28, 
+                title=f'CD28 Sequence Clusters (k={k_cd28})', 
+                output_path=cd28_plot_path,
                 plot_method=plot_method
             )
             
+            # Plot CD3ζ clusters
+            cd3z_plot_path = plots_dir / f'cd3z_clusters{method_suffix}.png'
             plot_clusters(
-                X3z, 
-                km3z.labels_, 
-                wt_idx3z, 
-                f'CD3ζ Sequence Clusters (k={k_cd3z})', 
-                plots_dir / f'cd3z_clusters{method_suffix}.png',
+                X=X3z, 
+                labels=km3z.labels_, 
+                wt_idx=wt_idx3z, 
+                title=f'CD3ζ Sequence Clusters (k={k_cd3z})', 
+                output_path=cd3z_plot_path,
                 plot_method=plot_method
             )
 
