@@ -85,58 +85,73 @@ def parse_args():
     parser.add_argument("--output_dir",  type=Path, default=checkpoints_dir, help="Directory to save models")
     parser.add_argument("--device",      choices=["auto", "cuda", "mps", "cpu"], default="mps", help="Device to run on")
     parser.add_argument("--batch_size",  type=int, default=32, help="Batch size for training and validation")
-    parser.add_argument("--max_length",  type=int, default=256, help="Maximum sequence length (was 512)")
+    parser.add_argument("--max_length",  type=int, default=256, help="Maximum sequence length")
     parser.add_argument("--grad_accum",  type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--no_pin_memory", action="store_true", help="Disable pin_memory in DataLoader to save memory")
     parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate for the optimizer")
+    # Model selection
+    parser.add_argument("--model_name", type=str, default="facebook/esm2_t33_35M_UR50D", 
+                       help="ESM2 model to use (default: 35M parameter model)")
+    # Training parameters
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum number of epochs")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (in epochs)")
+    # Evaluation parameters
+    parser.add_argument("--top_k_percent", type=float, default=25.0, 
+                       help="Top percentage of sequences to consider for binary evaluation")
     # wandb & mlflow flags
     parser.add_argument("--use_wandb", action="store_true", help="Log to Weights & Biases")
     parser.add_argument("--wandb_project", type=str, default="esm2-cart", help="wandb project name")
     parser.add_argument("--use_mlflow", action="store_true", help="Log to MLflow")
     parser.add_argument("--mlflow_experiment", type=str, default="esm2-cart", help="mlflow experiment name")
     parser.add_argument("--view_mlflow", action="store_true", help="Start MLflow UI after training")
-    # early stopping
-    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience (in epochs)")
-    # Add plotting arguments
-    parser.add_argument("--plot_metrics", action="store_true", help="Generate and save training metrics plots")
-    parser.add_argument("--plots_dir", type=Path, default=project_root / "plots", help="Directory to save plots")
     
     return parser.parse_args()
 
 def compute_metrics(model, val_loader, device):
-    """Compute Spearman correlation and other metrics."""
+    """Compute evaluation metrics including binary classification for top K%."""
     model.eval()
-    predictions = []
-    targets = []
+    all_predictions = []
+    all_targets = []
     
     with torch.no_grad():
         for batch in val_loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**batch)
-            predictions.extend(outputs.logits.cpu().numpy())
-            targets.extend(batch['labels'].cpu().numpy())
+            inputs = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**inputs)
+            predictions = outputs.logits.argmax(dim=-1)
+            targets = inputs['labels']
+            
+            # Filter out masked tokens (-100)
+            mask = targets != -100
+            predictions = predictions[mask]
+            targets = targets[mask]
+            
+            all_predictions.extend(predictions.cpu().numpy())
+            all_targets.extend(targets.cpu().numpy())
     
-    predictions = np.array(predictions)
-    targets = np.array(targets)
+    # Convert to numpy arrays
+    predictions = np.array(all_predictions)
+    targets = np.array(all_targets)
     
     # Compute Spearman correlation
     spearman = spearmanr(predictions, targets)[0]
     
-    # Compute Recall@K and Precision@K
-    k_values = [5, 10]
-    recall = {}
-    precision = {}
+    # Compute binary metrics for top K%
+    k = int(len(targets) * (args.top_k_percent / 100))
+    top_k_indices = np.argsort(targets)[-k:]
     
-    for k in k_values:
-        top_k_indices = np.argsort(predictions)[-k:]
-        relevant = np.sum(targets[top_k_indices] > 0)
-        recall[k] = relevant / np.sum(targets > 0)
-        precision[k] = relevant / k
+    # Sort predictions and get top K
+    sorted_pred_indices = np.argsort(predictions)[-k:]
+    
+    # Compute Recall@K and Precision@K
+    recall_at_k = len(set(top_k_indices) & set(sorted_pred_indices)) / k
+    precision_at_k = len(set(top_k_indices) & set(sorted_pred_indices)) / k
     
     return {
         'spearman': spearman,
-        'recall': recall,
-        'precision': precision
+        'recall_at_k': recall_at_k,
+        'precision_at_k': precision_at_k,
+        'predictions': predictions.tolist(),
+        'targets': targets.tolist()
     }
 
 def run_finetuning(args):
@@ -176,22 +191,17 @@ def run_finetuning(args):
         # log hyperparameters
         mlflow.log_params({
             "group": args.group,
-            "lr": 5e-6,
+            "lr": args.learning_rate,
             "batch_size": args.batch_size,
-            "epochs": 50,
+            "epochs": args.max_epochs,
             "device": str(device),
             "patience": args.patience,
             "max_length": args.max_length,
             "grad_accum": args.grad_accum,
         })
 
-    # ─── Create plots directory if needed ──────────────────────────────────────────
-    if args.plot_metrics:
-        args.plots_dir.mkdir(parents=True, exist_ok=True)
-
     # ─── Prepare tokenizer + dataset ──────────────────────────────────────────────
-    model_name = "facebook/esm2_t6_8M_UR50D"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, do_lower_case=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, do_lower_case=False)
 
     fasta = args.high_fasta if args.group == "high" else args.low_fasta
     full_ds = SequenceDataset(fasta, tokenizer, max_length=args.max_length)
@@ -214,10 +224,10 @@ def run_finetuning(args):
     )
 
     # ─── Load model, optimizer, scheduler ────────────────────────────────────────
-    model = AutoModelForMaskedLM.from_pretrained(model_name)
+    model = AutoModelForMaskedLM.from_pretrained(args.model_name)
     model.to(device)
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
-    total_steps = len(train_loader) * 50  # 50 epochs
+    total_steps = len(train_loader) * args.max_epochs
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
     
     # Ensure checkpoint directory exists
@@ -231,7 +241,10 @@ def run_finetuning(args):
     recall_scores = {5: [], 10: []}
     precision_scores = {5: [], 10: []}
     
-    for epoch in range(1, 51):
+    best_val_loss = float('inf')
+    epochs_no_improve = 0
+    
+    for epoch in range(1, args.max_epochs + 1):
         model.train()
         train_loss = 0.0
         for batch_idx, batch in enumerate(train_loader):
@@ -263,22 +276,31 @@ def run_finetuning(args):
         # Compute metrics
         metrics = compute_metrics(model, val_loader, device)
         spearman_scores.append(metrics['spearman'])
-        for k in [5, 10]:
-            recall_scores[k].append(metrics['recall'][k])
-            precision_scores[k].append(metrics['precision'][k])
+        recall_scores[5].append(metrics['recall_at_k'])
+        recall_scores[10].append(metrics['recall_at_k'])
+        precision_scores[5].append(metrics['precision_at_k'])
+        precision_scores[10].append(metrics['precision_at_k'])
         
-        # Save metrics for plotting
-        train_losses.append(avg_train)
-        val_losses.append(avg_val)
-
-        print(f"Epoch {epoch:2d}  Train: {avg_train:.4f}  Val: {avg_val:.4f}")
+        print(f"Epoch {epoch:2d}  Train: {avg_train:.4f}  Val: {avg_val:.4f}  Spearman: {metrics['spearman']:.4f}")
 
         # ─── Log metrics ────────────────────────────────────────────────────────
         if args.use_wandb:
-            wandb.log({"epoch": epoch, "train_loss": avg_train, "val_loss": avg_val})
+            wandb.log({
+                "epoch": epoch, 
+                "train_loss": avg_train, 
+                "val_loss": avg_val,
+                "spearman": metrics['spearman'],
+                "recall_at_k": metrics['recall_at_k'],
+                "precision_at_k": metrics['precision_at_k']
+            })
         if args.use_mlflow:
-            mlflow.log_metric("train_loss", avg_train, step=epoch)
-            mlflow.log_metric("val_loss",   avg_val,   step=epoch)
+            mlflow.log_metrics({
+                "train_loss": avg_train,
+                "val_loss": avg_val,
+                "spearman": metrics['spearman'],
+                "recall_at_k": metrics['recall_at_k'],
+                "precision_at_k": metrics['precision_at_k']
+            }, step=epoch)
 
         # ─── Check early stopping ───────────────────────────────────────────────
         if avg_val < best_val_loss:
@@ -288,7 +310,7 @@ def run_finetuning(args):
             ckpt = args.output_dir / f"{args.group}_best.pth"
             torch.save(model.state_dict(), ckpt)
             if args.use_wandb:
-                wandb.save(os.path.basename(ckpt))
+                wandb.save(str(ckpt))
             if args.use_mlflow:
                 mlflow.log_artifact(str(ckpt))
         else:
@@ -308,59 +330,6 @@ def run_finetuning(args):
                 wandb.log_artifact(artifact)
             if args.use_mlflow:
                 mlflow.pytorch.log_model(model, artifact_path=f"{args.group}_epoch_{epoch}")
-    
-    # Generate plots
-    plots_dir = Path(args.plots_dir)
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 1. Training and Validation Loss
-    plot_training_metrics(
-        {'loss': train_losses},
-        {'loss': val_losses},
-        str(plots_dir / f'{args.group}_training_loss.png'),
-        f'ESM2-8M ({args.group.capitalize()})'
-    )
-    
-    # 2. Spearman Correlation vs Epoch
-    spearman_data = {
-        'mean': np.mean(spearman_scores, axis=1),
-        'std': np.std(spearman_scores, axis=1)
-    }
-    plot_spearman_vs_epoch(
-        spearman_data,
-        str(plots_dir / f'{args.group}_spearman_vs_epoch.png'),
-        f'ESM2-8M ({args.group.capitalize()})'
-    )
-    
-    # 3. Model Comparison (to be called after all models are trained)
-    if args.group == 'low':  # Run this after all models are trained
-        model_scores = {
-            'Pretrained': pretrained_spearman_scores,
-            'High Diversity': high_diversity_spearman_scores,
-            'Low Diversity': low_diversity_spearman_scores
-        }
-        plot_model_comparison(
-            model_scores,
-            str(plots_dir / 'model_comparison.png')
-        )
-    
-    # 4. Recall and Precision
-    metrics_data = {
-        'recall': {
-            'Pretrained': [np.mean(pretrained_recall[5]), np.mean(pretrained_recall[10])],
-            'High Diversity': [np.mean(high_diversity_recall[5]), np.mean(high_diversity_recall[10])],
-            'Low Diversity': [np.mean(low_diversity_recall[5]), np.mean(low_diversity_recall[10])]
-        },
-        'precision': {
-            'Pretrained': [np.mean(pretrained_precision[5]), np.mean(pretrained_precision[10])],
-            'High Diversity': [np.mean(high_diversity_precision[5]), np.mean(high_diversity_precision[10])],
-            'Low Diversity': [np.mean(low_diversity_precision[5]), np.mean(low_diversity_precision[10])]
-        }
-    }
-    plot_recall_precision(
-        metrics_data,
-        str(plots_dir / 'recall_precision.png')
-    )
 
     # ─── Finish runs ───────────────────────────────────────────────────────────
     if args.use_wandb:
@@ -379,6 +348,14 @@ def run_finetuning(args):
             subprocess.run(["mlflow", "ui", "--port", "5000"], check=True)
         except KeyboardInterrupt:
             print("[INFO] MLflow UI stopped")
+
+    return {
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'spearman_scores': spearman_scores,
+        'recall_scores': recall_scores,
+        'precision_scores': precision_scores
+    }
 
 def main():
     args = parse_args()
