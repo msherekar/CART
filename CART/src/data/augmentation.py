@@ -372,11 +372,7 @@ def make_test_fasta(output_path: Path, sequences: list = None):
             f.write(f">seq_{i}\n{seq}\n")
     print(f"Created test FASTA file at {output_path}")
 
-
-if __name__ == '__main__':
-    # Get project root to handle relative paths
-    project_root = get_project_root()
-    
+def parse_args():
     parser = argparse.ArgumentParser(description=(
         "Generate augmented CAR sequences by recombining homologous domains. "
         "Uses HMMER to search for homologs and K-means for clustering."
@@ -407,7 +403,13 @@ if __name__ == '__main__':
                        help='Method for visualizing clusters (default: kmeans)')
     parser.add_argument('--create_test_data', action='store_true',
                        help='Create test FASTA files if input files do not exist')
-    args = parser.parse_args()
+    return parser.parse_args()
+
+def run_augmentation():
+    # Get project root to handle relative paths
+    project_root = get_project_root()
+    
+    args = parse_args()
 
     # Resolve all paths relative to project root
     wt_cd28_path = resolve_path(args.wt_cd28)
@@ -545,3 +547,7 @@ if __name__ == '__main__':
     print(f'✅ Sequence augmentation completed:')
     print(f'   - {len(high)} high-diversity sequences saved to {high_fasta}')
     print(f'   - {len(low)} low-diversity sequences saved to {low_fasta}')
+
+
+if __name__ == '__main__':
+    run_augmentation()
