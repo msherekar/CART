@@ -392,7 +392,8 @@ def parse_args():
     )
     return parser.parse_args()
 
-if __name__ == "__main__":
+
+def run_mds():
     # Parse command line arguments
     args = parse_args()
     
@@ -420,6 +421,9 @@ if __name__ == "__main__":
         sample_frac=args.sample_fraction,
         random_state=args.random_state
     )
+
+if __name__ == "__main__":
+    run_mds()
 
 
 # Analysis of generated CAR sequences.
