@@ -7,6 +7,9 @@ import random
 import csv
 import argparse
 from pathlib import Path
+from matplotlib import pyplot as plt
+import numpy as np
+from scipy.stats import norm
 
 # Constant FMC63 scFv sequence (VH-linker-VL format)
 FMC63_SCFV = ("EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWVAYISSGGGSTYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKYPHGYWYFDVWGQGTLVTVSSGGGGSGGGGSGGGGSEIVLTQSPGTLSLSPGERATLSCRASQSVSSSYLAWYQQKPGQAPRLLIYDASTRATGIPDRFSGSGSGTDFTLTISSLQPEDFATYYCQQYNSYPLTFGAGTKLEIK")
@@ -19,6 +22,7 @@ AA_LIST = "ACDEFGHIKLMNPQRSTVWY"
 DEFAULT_N_MUTANTS = 382
 DEFAULT_MAX_MUTATIONS = 10
 DEFAULT_OUTPUT_DIR = "CART/mutants"
+DEFAULT_PLOTS_DIR = "CART/plots"
 
 
 def get_project_root() -> Path:
@@ -53,18 +57,20 @@ def resolve_path(path_str: str) -> Path:
     return get_project_root() / path
 
 
-def mutate_sequence(seq, max_mutations):
+def mutate_sequence(seq, num_mutations):
     """
-    Create a mutated version of a sequence with random amino acid substitutions.
+    Create a mutated version of a sequence with specified number of amino acid substitutions.
     
     Args:
         seq: Original amino acid sequence
-        max_mutations: Maximum number of mutations to introduce
+        num_mutations: Number of mutations to introduce (can be 0)
         
     Returns:
         Mutated sequence
     """
-    num_mutations = random.randint(1, max_mutations)
+    if num_mutations == 0:
+        return seq
+        
     positions = random.sample(range(len(seq)), num_mutations)
     mutated = list(seq)
     for pos in positions:
@@ -77,13 +83,14 @@ def mutate_sequence(seq, max_mutations):
 def generate_car_mutants(n, cd28_seq, cd3z_seq, scfv, max_mutations, random_seed=None):
     """
     Generate CAR mutants by introducing random mutations to CD28 and CD3ζ domains.
+    The total number of mutations across both domains will not exceed max_mutations.
     
     Args:
         n: Number of mutants to generate
         cd28_seq: CD28 domain sequence
         cd3z_seq: CD3ζ domain sequence
         scfv: scFv sequence (constant)
-        max_mutations: Maximum number of mutations per domain
+        max_mutations: Maximum number of mutations per CAR (across both domains)
         random_seed: Seed for random number generator (optional)
         
     Returns:
@@ -94,12 +101,55 @@ def generate_car_mutants(n, cd28_seq, cd3z_seq, scfv, max_mutations, random_seed
         
     mutants = []
     for i in range(n):
-        mut_cd28 = mutate_sequence(cd28_seq, max_mutations)
-        mut_cd3z = mutate_sequence(cd3z_seq, max_mutations)
+        # Determine how many mutations to apply to each domain
+        total_mutations = random.randint(1, max_mutations)
+        # Randomly split mutations between domains
+        cd28_mutations = random.randint(0, total_mutations)
+        cd3z_mutations = total_mutations - cd28_mutations
+        
+        # Apply mutations to each domain
+        mut_cd28 = mutate_sequence(cd28_seq, cd28_mutations)
+        mut_cd3z = mutate_sequence(cd3z_seq, cd3z_mutations)
+        
+        # Combine into full sequence
         full_seq = scfv + mut_cd28 + mut_cd3z
         mutants.append((f"CAR_mutant_{i+1}", full_seq))
     return mutants
 
+def dummy_cytox_data(mutants, output_path: Path, baseline_cytox=50, std_dev=20, random_seed=None):
+    """
+    Generate dummy cytotoxicity data for the mutants using a Gaussian distribution.
+    
+    Args:
+        mutants: List of (mutant_id, mutant_sequence) tuples
+        output_path: Path to save the cytotoxicity data
+        baseline_cytox: Baseline cytotoxicity value (default: 50)
+        std_dev: Standard deviation for the Gaussian distribution (default: 20)
+        random_seed: Random seed for reproducibility (optional)
+        
+    Returns:
+        List of (mutant_id, cytotoxicity) tuples
+    """
+    if random_seed is not None:
+        random.seed(random_seed)
+    
+    # Generate cytotoxicity values from Gaussian distribution
+    cytox_data = []
+    for mutant_id, _ in mutants:
+        # Generate value from Gaussian distribution
+        cytox = random.gauss(baseline_cytox, std_dev)
+        # Ensure cytotoxicity is non-negative
+        cytox = max(0, cytox)
+        cytox_data.append((mutant_id, cytox))
+    
+    # Save to CSV
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["mutant_id", "cytotoxicity"])
+        writer.writerows(cytox_data)
+    
+    return cytox_data
 
 def save_mutants(mutants, output_path: Path):
     """
@@ -133,6 +183,93 @@ def save_mutants(mutants, output_path: Path):
     
     return csv_path, tsv_path, fasta_path
 
+def plot_mutants(mutants, output_path: Path):
+    """
+    Plot the distribution of mutations in the mutants.
+    
+    Args:
+        mutants: List of (mutant_id, mutant_sequence) tuples
+        output_path: Path to save the plot
+    """
+    if not mutants:
+        raise ValueError("No mutants provided for plotting")
+    
+    # Count mutations in each sequence
+    mutation_counts = []
+    for _, seq in mutants:
+        # Count differences from wild-type sequence
+        mutations = sum(1 for a, b in zip(seq, FMC63_SCFV + CD28_SEQ + CD3Z_SEQ) if a != b)
+        mutation_counts.append(mutations)
+    
+    # Create histogram
+    plt.figure(figsize=(10, 6))
+    plt.hist(mutation_counts, bins=range(min(mutation_counts), max(mutation_counts) + 2), 
+             edgecolor='black', alpha=0.7)
+    
+    # Add labels and title
+    plt.title("Distribution of Mutations in CAR Mutants", fontsize=14)
+    plt.xlabel("Number of Mutations", fontsize=12)
+    plt.ylabel("Number of Mutants", fontsize=12)
+    
+    # Add grid and adjust layout
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    # Save plot
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+def plot_cytotoxicity(cytox_data, output_path: Path):
+    """
+    Plot the distribution of cytotoxicity in the mutants.
+    
+    Args:
+        cytox_data: List of (mutant_id, cytotoxicity) tuples
+        output_path: Path to save the plot
+    """
+    if not cytox_data:
+        raise ValueError("No cytotoxicity data provided for plotting")
+    
+    # Extract cytotoxicity values
+    cytox_values = [cytox for _, cytox in cytox_data]
+    
+    # Create histogram
+    plt.figure(figsize=(10, 6))
+    n, bins, patches = plt.hist(cytox_values, bins=30, edgecolor='black', alpha=0.7)
+    
+    # Add Gaussian curve
+    mu, std = norm.fit(cytox_values)
+    xmin, xmax = plt.xlim()
+    x = np.linspace(xmin, xmax, 100)
+    p = norm.pdf(x, mu, std)
+    plt.plot(x, p * len(cytox_values) * (bins[1] - bins[0]), 'r-', linewidth=2)
+    
+    # Add labels and title
+    plt.title("Distribution of Cytotoxicity in CAR Mutants", fontsize=14)
+    plt.xlabel("Cytotoxicity", fontsize=12)
+    plt.ylabel("Number of Mutants", fontsize=12)
+    
+    # Add legend and grid
+    plt.legend(['Gaussian Fit', 'Data'])
+    plt.grid(True, alpha=0.3)
+    
+    # Add statistics
+    plt.text(0.02, 0.98, 
+             f'Mean: {mu:.2f}\nStd Dev: {std:.2f}',
+             transform=plt.gca().transAxes,
+             verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save plot
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    
 
 def parse_args():
     """Parse command line arguments."""
@@ -153,6 +290,20 @@ def parse_args():
     parser.add_argument('--random_seed', type=int, default=None,
                        help='Random seed for reproducibility (default: None)')
     
+    # Cytotoxicity parameters
+    parser.add_argument('--baseline_cytox', type=float, default=50.0,
+                       help='Baseline cytotoxicity value for Gaussian distribution (default: 50.0)')
+    
+    parser.add_argument('--cytox_std_dev', type=float, default=20.0,
+                       help='Standard deviation for cytotoxicity Gaussian distribution (default: 20.0)')
+    
+    # Plotting options
+    parser.add_argument('--no_plots', action='store_true',
+                       help='Skip generating plots')
+    
+    parser.add_argument('--plots_dir', type=str, default=DEFAULT_PLOTS_DIR,
+                       help='Directory to save plots (default: plots)')
+    
     return parser.parse_args()
 
 
@@ -170,9 +321,10 @@ def run_mutants(args):
     project_root = get_project_root()
     print(f"Project root: {project_root}")
     
-    # Resolve output path
+    # Resolve output paths
     output_dir_path = resolve_path(args.output_dir)
     output_path = output_dir_path / args.output_name
+    plots_dir_path = resolve_path(args.plots_dir)
     
     print(f"Generating {args.n_mutants} FMC63-CAR mutants with up to {args.max_mutations} mutations per domain...")
     
@@ -186,7 +338,7 @@ def run_mutants(args):
         args.random_seed
     )
     
-    # Save to files
+    # Save mutants to files
     csv_path, tsv_path, fasta_path = save_mutants(mutants, output_path)
     
     print(f"✅ Generated {args.n_mutants} FMC63-CAR mutants")
@@ -194,7 +346,34 @@ def run_mutants(args):
     print(f"   TSV saved to: {tsv_path}")
     print(f"   FASTA saved to: {fasta_path}")
     
-    return csv_path, tsv_path, fasta_path
+    # Generate cytotoxicity data
+    cytox_path = output_dir_path / f"{args.output_name}_cytox.csv"
+    cytox_data = dummy_cytox_data(
+        mutants,
+        output_path=cytox_path,
+        baseline_cytox=args.baseline_cytox,
+        std_dev=args.cytox_std_dev,
+        random_seed=args.random_seed
+    )
+    print(f"✅ Generated cytotoxicity data")
+    print(f"   Cytotoxicity data saved to: {cytox_path}")
+    
+    # Generate plots if not disabled
+    if not args.no_plots:
+        # Create plots directory
+        plots_dir_path.mkdir(parents=True, exist_ok=True)
+        
+        # Plot mutation distribution
+        mutation_plot_path = plots_dir_path / "mutation_distribution.png"
+        plot_mutants(mutants, mutation_plot_path)
+        print(f"   Mutation distribution plot saved to: {mutation_plot_path}")
+        
+        # Plot cytotoxicity distribution
+        cytox_plot_path = plots_dir_path / "cytotoxicity_distribution.png"
+        plot_cytotoxicity(cytox_data, cytox_plot_path)
+        print(f"   Cytotoxicity distribution plot saved to: {cytox_plot_path}")
+    
+    return csv_path, tsv_path, fasta_path, cytox_path
 
 
 def main():
