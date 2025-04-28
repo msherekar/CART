@@ -90,8 +90,8 @@ def parse_args():
     parser.add_argument("--no_pin_memory", action="store_true", help="Disable pin_memory in DataLoader to save memory")
     parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate for the optimizer")
     # Model selection
-    parser.add_argument("--model_name", type=str, default="facebook/esm2_t33_35M_UR50D", 
-                       help="ESM2 model to use (default: 35M parameter model)")
+    parser.add_argument("--model_name", type=str, default="facebook/esm2_t6_8M_UR50D", 
+                       help="ESM2 model to use (default: 8M parameter model)")
     # Training parameters
     parser.add_argument("--max_epochs", type=int, default=50, help="Maximum number of epochs")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (in epochs)")
@@ -198,18 +198,25 @@ def run_finetuning(args):
             "patience": args.patience,
             "max_length": args.max_length,
             "grad_accum": args.grad_accum,
+            "model": args.model_name
         })
 
     # ─── Prepare tokenizer + dataset ──────────────────────────────────────────────
+    print(f"[INFO] Loading model and tokenizer: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, do_lower_case=False)
+    model = AutoModelForMaskedLM.from_pretrained(args.model_name)
+    model.to(device)
 
     fasta = args.high_fasta if args.group == "high" else args.low_fasta
+    print(f"[INFO] Loading sequences from: {fasta}")
     full_ds = SequenceDataset(fasta, tokenizer, max_length=args.max_length)
     train_size = int(0.8 * len(full_ds))
     val_size   = len(full_ds) - train_size
     train_ds, val_ds = random_split(
         full_ds, [train_size, val_size], generator=torch.Generator().manual_seed(42)
     )
+
+    print(f"[INFO] Dataset sizes - Train: {len(train_ds)}, Val: {len(val_ds)}")
 
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=True, mlm_probability=0.15
@@ -223,9 +230,7 @@ def run_finetuning(args):
         collate_fn=data_collator, num_workers=2, pin_memory=not args.no_pin_memory
     )
 
-    # ─── Load model, optimizer, scheduler ────────────────────────────────────────
-    model = AutoModelForMaskedLM.from_pretrained(args.model_name)
-    model.to(device)
+    # ─── Load optimizer and scheduler ────────────────────────────────────────
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
     total_steps = len(train_loader) * args.max_epochs
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
@@ -244,6 +249,7 @@ def run_finetuning(args):
     best_val_loss = float('inf')
     epochs_no_improve = 0
     
+    print(f"[INFO] Starting training for {args.max_epochs} epochs")
     for epoch in range(1, args.max_epochs + 1):
         model.train()
         train_loss = 0.0
