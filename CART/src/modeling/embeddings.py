@@ -24,7 +24,7 @@ def select_device(choice: str) -> torch.device:
         return torch.device("cpu")
     return torch.device(choice)
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--fasta",
@@ -50,8 +50,9 @@ def main():
         default="auto",
         help="Compute device to use",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+def run_embeddings(args):
     device = select_device(args.device)
     print(f"[INFO] Using device: {device}")
 
@@ -119,6 +120,10 @@ def main():
         for sid in seq_ids:
             fh.write(f"{sid}\n")
     print(f"[INFO] Saved sequence IDs to {id_file}")
+
+def main():
+    args = parse_args()
+    run_embeddings(args)
 
 if __name__ == "__main__":
     main()
