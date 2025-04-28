@@ -59,7 +59,7 @@ def select_device(choice: str) -> torch.device:
         return torch.device("cpu")
     return torch.device(choice)
 
-def run_finetuning():
+def parse_args():
     # Define project root for relative paths
     project_root = Path("/Users/mukulsherekar/pythonProject/CART-Project")
     checkpoints_dir = project_root / "checkpoints"
@@ -88,7 +88,15 @@ def run_finetuning():
     # Add plotting arguments
     parser.add_argument("--plot_metrics", action="store_true", help="Generate and save training metrics plots")
     parser.add_argument("--plots_dir", type=Path, default=project_root / "plots", help="Directory to save plots")
-    args = parser.parse_args()
+    
+    return parser.parse_args()
+
+def run_finetuning(args):
+    # Define project root for relative paths
+    project_root = Path("/Users/mukulsherekar/pythonProject/CART-Project")
+    checkpoints_dir = project_root / "checkpoints"
+    mlruns_dir = project_root / "mlruns"
+    wandb_dir = project_root / "wandb"
 
     device = select_device(args.device)
     print(f"[INFO] Using device: {device}")
@@ -277,5 +285,9 @@ def run_finetuning():
         except KeyboardInterrupt:
             print("[INFO] MLflow UI stopped")
 
+def main():
+    args = parse_args()
+    run_finetuning(args)
+
 if __name__ == "__main__":
-    run_finetuning()
+    main()
