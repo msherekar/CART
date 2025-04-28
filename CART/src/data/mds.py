@@ -235,7 +235,6 @@ def create_combined_plot(high_seqs, low_seqs, high_emb, low_emb, wt_emb, wild_ty
     
     # Plot C: Levenshtein distances
     ax3 = plt.subplot(gs[2])
-    
     if wild_type:
         high_distances = [levenshtein_distance(wild_type, seq) for seq in high_seqs]
         low_distances = [levenshtein_distance(wild_type, seq) for seq in low_seqs]
@@ -392,11 +391,8 @@ def parse_args():
     )
     return parser.parse_args()
 
-
-def run_mds():
-    # Parse command line arguments
-    args = parse_args()
-    
+def run_mds(args):
+    """Run MDS analysis with parsed arguments"""
     # Get project root for resolving relative paths
     root = get_project_root()
     
@@ -422,12 +418,14 @@ def run_mds():
         random_state=args.random_state
     )
 
-if __name__ == "__main__":
-    run_mds()
+def main():
+    args = parse_args()
+    run_mds(args)
 
+if __name__ == "__main__":
+    main()
 
 # Analysis of generated CAR sequences.
-
 # (A) MDS plot of generated sequences, comparing the high-diversity and low-diversity groups. 
 # The orange plots represent sequences belonging to the high-diversity group, 
 # while the blue plots represent sequences belonging to the low-diversity group. 
@@ -435,4 +433,4 @@ if __name__ == "__main__":
 # The yellow star indicates the wild-type (= original sequence before introducing mutations) sequence. 
 # (B) Distribution of the sequence lengths. 
 # (C) Levenshtein distances from the wild-type sequence.
-# A stress value of 0 indicates “perfect” fit, 0.025 excellent, 0.05 good, 0.1 fair, and 0.2 poor
+# A stress value of 0 indicates "perfect" fit, 0.025 excellent, 0.05 good, 0.1 fair, and 0.2 poor
