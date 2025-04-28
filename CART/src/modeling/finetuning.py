@@ -22,23 +22,8 @@ import wandb
 import mlflow
 import numpy as np
 from scipy.stats import spearmanr
-
-# Import visualization module for plotting metrics
-try:
-    from .visualization import (
-        plot_training_metrics,
-        plot_spearman_vs_epoch,
-        plot_model_comparison,
-        plot_recall_precision
-    )
-except ImportError:
-    from visualization import (
-        plot_training_metrics,
-        plot_spearman_vs_epoch,
-        plot_model_comparison,
-        plot_recall_precision
-    )
-
+import matplotlib.pyplot as plt
+import pandas as pd
 
 class SequenceDataset(Dataset):
     def __init__(self, fasta_path: Path, tokenizer, max_length: int = 512):
@@ -108,7 +93,7 @@ def parse_args():
     return parser.parse_args()
 
 def compute_metrics(model, val_loader, device):
-    """Compute evaluation metrics including binary classification for top K%."""
+    """Compute Spearman correlation between predictions and targets."""
     model.eval()
     all_predictions = []
     all_targets = []
@@ -128,35 +113,41 @@ def compute_metrics(model, val_loader, device):
             all_predictions.extend(predictions.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
     
-    # Convert to numpy arrays
-    predictions = np.array(all_predictions)
-    targets = np.array(all_targets)
-    
     # Compute Spearman correlation
-    spearman = spearmanr(predictions, targets)[0]
+    spearman = spearmanr(all_predictions, all_targets)[0]
+    return spearman
+
+def plot_metrics(train_losses, val_losses, spearman_scores, output_dir, group):
+    """Plot training metrics and save to file."""
+    epochs = range(1, len(train_losses) + 1)
     
-    # Compute binary metrics for top K%
-    k = int(len(targets) * (args.top_k_percent / 100))
-    top_k_indices = np.argsort(targets)[-k:]
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
     
-    # Sort predictions and get top K
-    sorted_pred_indices = np.argsort(predictions)[-k:]
+    # Plot losses
+    ax1.plot(epochs, train_losses, 'b-', label='Training Loss')
+    ax1.plot(epochs, val_losses, 'r-', label='Validation Loss')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.set_title(f'Training and Validation Loss ({group} diversity)')
+    ax1.legend()
+    ax1.grid(True)
     
-    # Compute Recall@K and Precision@K
-    recall_at_k = len(set(top_k_indices) & set(sorted_pred_indices)) / k
-    precision_at_k = len(set(top_k_indices) & set(sorted_pred_indices)) / k
+    # Plot Spearman correlation
+    ax2.plot(epochs, spearman_scores, 'g-')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Spearman Correlation')
+    ax2.set_title(f'Spearman Correlation ({group} diversity)')
+    ax2.grid(True)
     
-    return {
-        'spearman': spearman,
-        'recall_at_k': recall_at_k,
-        'precision_at_k': precision_at_k,
-        'predictions': predictions.tolist(),
-        'targets': targets.tolist()
-    }
+    # Adjust layout and save
+    plt.tight_layout()
+    plt.savefig(output_dir / f'{group}_metrics.png')
+    plt.close()
 
 def run_finetuning(args):
     # Define project root for relative paths
-    project_root = Path("/Users/mukulsherekar/pythonProject/CART-Project")
+    project_root = Path("/Users/mukulsherekar/pythonProject/CART-Project/CART")
     checkpoints_dir = project_root / "checkpoints"
     mlruns_dir = project_root / "mlruns"
     wandb_dir = project_root / "wandb"
@@ -198,7 +189,6 @@ def run_finetuning(args):
             "patience": args.patience,
             "max_length": args.max_length,
             "grad_accum": args.grad_accum,
-            "model": args.model_name
         })
 
     # ─── Prepare tokenizer + dataset ──────────────────────────────────────────────
@@ -336,6 +326,17 @@ def run_finetuning(args):
                 wandb.log_artifact(artifact)
             if args.use_mlflow:
                 mlflow.pytorch.log_model(model, artifact_path=f"{args.group}_epoch_{epoch}")
+
+    # ─── Save metrics to CSV ─────────────────────────────────────────────────
+    metrics_df = pd.DataFrame({
+        'epoch': range(1, len(train_losses) + 1),
+        'train_loss': train_losses,
+        'val_loss': val_losses,
+        'spearman': spearman_scores
+    })
+    metrics_file = args.output_dir / f"{args.group}_metrics.csv"
+    metrics_df.to_csv(metrics_file, index=False)
+    print(f"[INFO] Saved metrics to {metrics_file}")
 
     # ─── Finish runs ───────────────────────────────────────────────────────────
     if args.use_wandb:
