@@ -59,7 +59,7 @@ def select_device(choice: str) -> torch.device:
         return torch.device("cpu")
     return torch.device(choice)
 
-def main():
+def run_finetuning():
     # Define project root for relative paths
     project_root = Path("/Users/mukulsherekar/pythonProject/CART-Project")
     checkpoints_dir = project_root / "checkpoints"
@@ -278,4 +278,4 @@ def main():
             print("[INFO] MLflow UI stopped")
 
 if __name__ == "__main__":
-    main()
+    run_finetuning()
