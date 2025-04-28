@@ -6,6 +6,7 @@ Adds:
   - wandb logging (--use_wandb, --wandb_project)
   - mlflow logging (--use_mlflow, --mlflow_experiment)
   - early stopping (--patience)
+  - visualization of training metrics (--plot_metrics)
 """
 import argparse
 import os
@@ -15,25 +16,17 @@ from pathlib import Path
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.optim import AdamW
-from transformers import (
-    AutoTokenizer,
-    AutoModelForMaskedLM,
-    DataCollatorForLanguageModeling,
-    get_linear_schedule_with_warmup,
-)
+from transformers import (AutoTokenizer,AutoModelForMaskedLM,DataCollatorForLanguageModeling,get_linear_schedule_with_warmup)
 from Bio import SeqIO
+import wandb
+import mlflow
 
-# optional imports
+# Import visualization module for plotting metrics
 try:
-    import wandb
+    from .visualization import plot_training_metrics
 except ImportError:
-    wandb = None
+    from visualization import plot_training_metrics
 
-try:
-    import mlflow
-    import mlflow.pytorch
-except ImportError:
-    mlflow = None
 
 class SequenceDataset(Dataset):
     def __init__(self, fasta_path: Path, tokenizer, max_length: int = 512):
@@ -67,18 +60,23 @@ def select_device(choice: str) -> torch.device:
     return torch.device(choice)
 
 def main():
+    # Define project root for relative paths
+    project_root = Path("/Users/mukulsherekar/pythonProject/CART-Project")
+    checkpoints_dir = project_root / "checkpoints"
+    mlruns_dir = project_root / "mlruns"
+    wandb_dir = project_root / "wandb"
+    
     parser = argparse.ArgumentParser()
-    parser.add_argument("--high_fasta",  type=Path, default="augmented_seqs/high_diversity.fasta")
-    parser.add_argument("--low_fasta",   type=Path, default="augmented_seqs/low_diversity.fasta")
-    parser.add_argument("--group",       choices=["high", "low"], required=True,
-                        help="Which set to fine-tune on")
-    parser.add_argument("--output_dir",  type=Path, default=Path("fine_tuned_models"))
-    parser.add_argument("--device",      choices=["auto", "cuda", "mps", "cpu"],
-                        default="mps", help="Device to run on")
+    parser.add_argument("--high_fasta",  type=Path, default=project_root / "CART/homologs/high_diversity.fasta")
+    parser.add_argument("--low_fasta",   type=Path, default=project_root / "CART/homologs/low_diversity.fasta")
+    parser.add_argument("--group",       choices=["high", "low"], required=True, help="Which set to fine-tune on")                        
+    parser.add_argument("--output_dir",  type=Path, default=checkpoints_dir, help="Directory to save models")
+    parser.add_argument("--device",      choices=["auto", "cuda", "mps", "cpu"], default="mps", help="Device to run on")
     parser.add_argument("--batch_size",  type=int, default=32, help="Batch size for training and validation")
     parser.add_argument("--max_length",  type=int, default=256, help="Maximum sequence length (was 512)")
     parser.add_argument("--grad_accum",  type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--no_pin_memory", action="store_true", help="Disable pin_memory in DataLoader to save memory")
+    parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate for the optimizer")
     # wandb & mlflow flags
     parser.add_argument("--use_wandb", action="store_true", help="Log to Weights & Biases")
     parser.add_argument("--wandb_project", type=str, default="esm2-cart", help="wandb project name")
@@ -87,6 +85,9 @@ def main():
     parser.add_argument("--view_mlflow", action="store_true", help="Start MLflow UI after training")
     # early stopping
     parser.add_argument("--patience", type=int, default=5, help="Early stopping patience (in epochs)")
+    # Add plotting arguments
+    parser.add_argument("--plot_metrics", action="store_true", help="Generate and save training metrics plots")
+    parser.add_argument("--plots_dir", type=Path, default=project_root / "plots", help="Directory to save plots")
     args = parser.parse_args()
 
     device = select_device(args.device)
@@ -96,6 +97,10 @@ def main():
     if args.use_wandb:
         if wandb is None:
             raise ImportError("wandb not installed; `pip install wandb` to use --use_wandb")
+        # Ensure wandb directory exists
+        wandb_dir.mkdir(parents=True, exist_ok=True)
+        # Set WANDB_DIR environment variable to specify where to store W&B files
+        os.environ["WANDB_DIR"] = str(wandb_dir)
         wandb.init(
             project=args.wandb_project,
             name=f"{args.group}_finetune",
@@ -106,6 +111,10 @@ def main():
     if args.use_mlflow:
         if mlflow is None:
             raise ImportError("mlflow not installed; `pip install mlflow` to use --use_mlflow")
+        # Ensure mlruns directory exists
+        mlruns_dir.mkdir(parents=True, exist_ok=True)
+        # Set MLFLOW_TRACKING_URI environment variable to store runs in project directory
+        os.environ["MLFLOW_TRACKING_URI"] = f"file://{mlruns_dir}"
         mlflow.set_experiment(args.mlflow_experiment)
         mlflow.start_run(run_name=f"{args.group}_finetune")
         # log hyperparameters
@@ -119,6 +128,10 @@ def main():
             "max_length": args.max_length,
             "grad_accum": args.grad_accum,
         })
+
+    # ─── Create plots directory if needed ──────────────────────────────────────────
+    if args.plot_metrics:
+        args.plots_dir.mkdir(parents=True, exist_ok=True)
 
     # ─── Prepare tokenizer + dataset ──────────────────────────────────────────────
     model_name = "facebook/esm2_t6_8M_UR50D"
@@ -147,17 +160,21 @@ def main():
     # ─── Load model, optimizer, scheduler ────────────────────────────────────────
     model = AutoModelForMaskedLM.from_pretrained(model_name)
     model.to(device)
-    optimizer = AdamW(model.parameters(), lr=5e-6)
+    optimizer = AdamW(model.parameters(), lr=args.learning_rate)
     total_steps = len(train_loader) * 50  # 50 epochs
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, num_warmup_steps=0, num_training_steps=total_steps
-    )
-
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
+    
+    # Ensure checkpoint directory exists
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     # ─── Training loop w/ early stopping ────────────────────────────────────────
     best_val_loss = float("inf")
     epochs_no_improve = 0
+    
+    # Track metrics for plotting
+    train_losses = []
+    val_losses = []
 
     for epoch in range(1, 51):
         model.train()
@@ -177,6 +194,7 @@ def main():
                 
             train_loss += loss.item() * args.grad_accum
         avg_train = train_loss / len(train_loader)
+        train_losses.append(avg_train)
 
         model.eval()
         val_loss = 0.0
@@ -185,6 +203,7 @@ def main():
                 batch = {k: v.to(device) for k, v in batch.items()}
                 val_loss += model(**batch).loss.item()
         avg_val = val_loss / len(val_loader)
+        val_losses.append(avg_val)
 
         print(f"Epoch {epoch:2d}  Train: {avg_train:.4f}  Val: {avg_val:.4f}")
 
@@ -223,6 +242,22 @@ def main():
                 wandb.log_artifact(artifact)
             if args.use_mlflow:
                 mlflow.pytorch.log_model(model, artifact_path=f"{args.group}_epoch_{epoch}")
+    
+    # ─── Plot and save training metrics ──────────────────────────────────────
+    if args.plot_metrics:
+        metrics = {"loss": train_losses}
+        val_metrics = {"loss": val_losses}
+        plot_path = args.plots_dir / f"{args.group}_training_metrics.png"
+        plot_training_metrics(
+            train_metrics=metrics,
+            val_metrics=val_metrics,
+            output_path=str(plot_path),
+            model_name=f"ESM2 Fine-tuned ({args.group.capitalize()})"
+        )
+        
+        # Log plot to MLflow if enabled
+        if args.use_mlflow:
+            mlflow.log_artifact(str(plot_path))
 
     # ─── Finish runs ───────────────────────────────────────────────────────────
     if args.use_wandb:
