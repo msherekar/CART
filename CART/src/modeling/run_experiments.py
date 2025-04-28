@@ -130,15 +130,16 @@ def generate_plots(results: Dict[str, Dict[str, List[float]]], plots_dir: Path) 
         str(plots_dir / 'recall_precision.png')
     )
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(description="Run cross-validation experiments for ESM2-8M models")
     parser.add_argument('--n_folds', type=int, default=5, help="Number of cross-validation folds")
     parser.add_argument('--plots_dir', type=Path, default=Path("plots"), help="Directory to save plots")
+    return parser.parse_args()
+
+def main():
     args = parse_args()
-    
     # Run cross-validation experiments
     results = run_cross_validation(args, n_folds=args.n_folds)
-    
     # Generate plots
     generate_plots(results, args.plots_dir)
 
