@@ -1,4 +1,7 @@
-# Generate FMC63-based CAR mutants with mutations in hinge, TM, and ICD of CD28 and CD3ζ
+#!/usr/bin/env python3
+"""
+Generate FMC63-based CAR mutants with mutations in hinge, TM, and ICD of CD28 and CD3ζ
+"""
 
 import random
 import csv
@@ -153,45 +156,40 @@ def parse_args():
     return parser.parse_args()
 
 
-def generate_mutants(n_mutants=DEFAULT_N_MUTANTS, 
-                    max_mutations=DEFAULT_MAX_MUTATIONS, 
-                    output_dir=DEFAULT_OUTPUT_DIR, 
-                    output_name="CAR_mutants", 
-                    random_seed=None):
+def run_mutants(args):
     """
-    Main function to generate and save CAR mutants.
-    This function can be imported into other scripts.
+    Run the mutant generation with the provided arguments.
     
     Args:
-        n_mutants: Number of mutants to generate
-        max_mutations: Maximum number of mutations per domain
-        output_dir: Directory for output files
-        output_name: Base name for output files
-        random_seed: Random seed for reproducibility
+        args: Parsed command-line arguments
         
     Returns:
         Tuple of paths to the CSV, TSV, and FASTA output files
     """
-    # Resolve output path
-    output_dir_path = resolve_path(output_dir)
-    output_path = output_dir_path / output_name
+    # Show project root for path reference
+    project_root = get_project_root()
+    print(f"Project root: {project_root}")
     
-    print(f"Generating {n_mutants} FMC63-CAR mutants with up to {max_mutations} mutations per domain...")
+    # Resolve output path
+    output_dir_path = resolve_path(args.output_dir)
+    output_path = output_dir_path / args.output_name
+    
+    print(f"Generating {args.n_mutants} FMC63-CAR mutants with up to {args.max_mutations} mutations per domain...")
     
     # Generate mutants
     mutants = generate_car_mutants(
-        n_mutants, 
+        args.n_mutants, 
         CD28_SEQ, 
         CD3Z_SEQ, 
         FMC63_SCFV, 
-        max_mutations,
-        random_seed
+        args.max_mutations,
+        args.random_seed
     )
     
     # Save to files
     csv_path, tsv_path, fasta_path = save_mutants(mutants, output_path)
     
-    print(f"✅ Generated {n_mutants} FMC63-CAR mutants")
+    print(f"✅ Generated {args.n_mutants} FMC63-CAR mutants")
     print(f"   CSV saved to: {csv_path}")
     print(f"   TSV saved to: {tsv_path}")
     print(f"   FASTA saved to: {fasta_path}")
@@ -199,19 +197,10 @@ def generate_mutants(n_mutants=DEFAULT_N_MUTANTS,
     return csv_path, tsv_path, fasta_path
 
 
-if __name__ == "__main__":
-    # Parse command line arguments
+def main():
     args = parse_args()
-    
-    # Show project root for path reference
-    project_root = get_project_root()
-    print(f"Project root: {project_root}")
-    
-    # Generate mutants with the specified parameters
-    generate_mutants(
-        n_mutants=args.n_mutants,
-        max_mutations=args.max_mutations,
-        output_dir=args.output_dir,
-        output_name=args.output_name,
-        random_seed=args.random_seed
-    )
+    run_mutants(args)
+
+
+if __name__ == "__main__":
+    main()
