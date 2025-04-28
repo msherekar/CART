@@ -20,12 +20,24 @@ from transformers import (AutoTokenizer,AutoModelForMaskedLM,DataCollatorForLang
 from Bio import SeqIO
 import wandb
 import mlflow
+import numpy as np
+from scipy.stats import spearmanr
 
 # Import visualization module for plotting metrics
 try:
-    from .visualization import plot_training_metrics
+    from .visualization import (
+        plot_training_metrics,
+        plot_spearman_vs_epoch,
+        plot_model_comparison,
+        plot_recall_precision
+    )
 except ImportError:
-    from visualization import plot_training_metrics
+    from visualization import (
+        plot_training_metrics,
+        plot_spearman_vs_epoch,
+        plot_model_comparison,
+        plot_recall_precision
+    )
 
 
 class SequenceDataset(Dataset):
@@ -90,6 +102,42 @@ def parse_args():
     parser.add_argument("--plots_dir", type=Path, default=project_root / "plots", help="Directory to save plots")
     
     return parser.parse_args()
+
+def compute_metrics(model, val_loader, device):
+    """Compute Spearman correlation and other metrics."""
+    model.eval()
+    predictions = []
+    targets = []
+    
+    with torch.no_grad():
+        for batch in val_loader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+            predictions.extend(outputs.logits.cpu().numpy())
+            targets.extend(batch['labels'].cpu().numpy())
+    
+    predictions = np.array(predictions)
+    targets = np.array(targets)
+    
+    # Compute Spearman correlation
+    spearman = spearmanr(predictions, targets)[0]
+    
+    # Compute Recall@K and Precision@K
+    k_values = [5, 10]
+    recall = {}
+    precision = {}
+    
+    for k in k_values:
+        top_k_indices = np.argsort(predictions)[-k:]
+        relevant = np.sum(targets[top_k_indices] > 0)
+        recall[k] = relevant / np.sum(targets > 0)
+        precision[k] = relevant / k
+    
+    return {
+        'spearman': spearman,
+        'recall': recall,
+        'precision': precision
+    }
 
 def run_finetuning(args):
     # Define project root for relative paths
@@ -176,14 +224,13 @@ def run_finetuning(args):
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ─── Training loop w/ early stopping ────────────────────────────────────────
-    best_val_loss = float("inf")
-    epochs_no_improve = 0
-    
-    # Track metrics for plotting
+    # Track metrics
     train_losses = []
     val_losses = []
-
+    spearman_scores = []
+    recall_scores = {5: [], 10: []}
+    precision_scores = {5: [], 10: []}
+    
     for epoch in range(1, 51):
         model.train()
         train_loss = 0.0
@@ -211,6 +258,17 @@ def run_finetuning(args):
                 batch = {k: v.to(device) for k, v in batch.items()}
                 val_loss += model(**batch).loss.item()
         avg_val = val_loss / len(val_loader)
+        val_losses.append(avg_val)
+
+        # Compute metrics
+        metrics = compute_metrics(model, val_loader, device)
+        spearman_scores.append(metrics['spearman'])
+        for k in [5, 10]:
+            recall_scores[k].append(metrics['recall'][k])
+            precision_scores[k].append(metrics['precision'][k])
+        
+        # Save metrics for plotting
+        train_losses.append(avg_train)
         val_losses.append(avg_val)
 
         print(f"Epoch {epoch:2d}  Train: {avg_train:.4f}  Val: {avg_val:.4f}")
@@ -251,21 +309,58 @@ def run_finetuning(args):
             if args.use_mlflow:
                 mlflow.pytorch.log_model(model, artifact_path=f"{args.group}_epoch_{epoch}")
     
-    # ─── Plot and save training metrics ──────────────────────────────────────
-    if args.plot_metrics:
-        metrics = {"loss": train_losses}
-        val_metrics = {"loss": val_losses}
-        plot_path = args.plots_dir / f"{args.group}_training_metrics.png"
-        plot_training_metrics(
-            train_metrics=metrics,
-            val_metrics=val_metrics,
-            output_path=str(plot_path),
-            model_name=f"ESM2 Fine-tuned ({args.group.capitalize()})"
+    # Generate plots
+    plots_dir = Path(args.plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 1. Training and Validation Loss
+    plot_training_metrics(
+        {'loss': train_losses},
+        {'loss': val_losses},
+        str(plots_dir / f'{args.group}_training_loss.png'),
+        f'ESM2-8M ({args.group.capitalize()})'
+    )
+    
+    # 2. Spearman Correlation vs Epoch
+    spearman_data = {
+        'mean': np.mean(spearman_scores, axis=1),
+        'std': np.std(spearman_scores, axis=1)
+    }
+    plot_spearman_vs_epoch(
+        spearman_data,
+        str(plots_dir / f'{args.group}_spearman_vs_epoch.png'),
+        f'ESM2-8M ({args.group.capitalize()})'
+    )
+    
+    # 3. Model Comparison (to be called after all models are trained)
+    if args.group == 'low':  # Run this after all models are trained
+        model_scores = {
+            'Pretrained': pretrained_spearman_scores,
+            'High Diversity': high_diversity_spearman_scores,
+            'Low Diversity': low_diversity_spearman_scores
+        }
+        plot_model_comparison(
+            model_scores,
+            str(plots_dir / 'model_comparison.png')
         )
-        
-        # Log plot to MLflow if enabled
-        if args.use_mlflow:
-            mlflow.log_artifact(str(plot_path))
+    
+    # 4. Recall and Precision
+    metrics_data = {
+        'recall': {
+            'Pretrained': [np.mean(pretrained_recall[5]), np.mean(pretrained_recall[10])],
+            'High Diversity': [np.mean(high_diversity_recall[5]), np.mean(high_diversity_recall[10])],
+            'Low Diversity': [np.mean(low_diversity_recall[5]), np.mean(low_diversity_recall[10])]
+        },
+        'precision': {
+            'Pretrained': [np.mean(pretrained_precision[5]), np.mean(pretrained_precision[10])],
+            'High Diversity': [np.mean(high_diversity_precision[5]), np.mean(high_diversity_precision[10])],
+            'Low Diversity': [np.mean(low_diversity_precision[5]), np.mean(low_diversity_precision[10])]
+        }
+    }
+    plot_recall_precision(
+        metrics_data,
+        str(plots_dir / 'recall_precision.png')
+    )
 
     # ─── Finish runs ───────────────────────────────────────────────────────────
     if args.use_wandb:
