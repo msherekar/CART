@@ -233,13 +233,14 @@ def run_finetuning(args):
     train_losses = []
     val_losses = []
     spearman_scores = []
-    recall_scores = {5: [], 10: []}
-    precision_scores = {5: [], 10: []}
     
-    best_val_loss = float('inf')
+    best_spearman = float('-inf')  # Initialize with negative infinity since we want to maximize Spearman
     epochs_no_improve = 0
+    best_epoch = 0
     
     print(f"[INFO] Starting training for {args.max_epochs} epochs")
+    print(f"[INFO] Early stopping: Will stop if no improvement in Spearman correlation for {args.patience} epochs")
+    
     for epoch in range(1, args.max_epochs + 1):
         model.train()
         train_loss = 0.0
@@ -270,14 +271,10 @@ def run_finetuning(args):
         val_losses.append(avg_val)
 
         # Compute metrics
-        metrics = compute_metrics(model, val_loader, device)
-        spearman_scores.append(metrics['spearman'])
-        recall_scores[5].append(metrics['recall_at_k'])
-        recall_scores[10].append(metrics['recall_at_k'])
-        precision_scores[5].append(metrics['precision_at_k'])
-        precision_scores[10].append(metrics['precision_at_k'])
+        spearman = compute_metrics(model, val_loader, device)
+        spearman_scores.append(spearman)
         
-        print(f"Epoch {epoch:2d}  Train: {avg_train:.4f}  Val: {avg_val:.4f}  Spearman: {metrics['spearman']:.4f}")
+        print(f"Epoch {epoch:2d}  Train: {avg_train:.4f}  Val: {avg_val:.4f}  Spearman: {spearman:.4f}")
 
         # ─── Log metrics ────────────────────────────────────────────────────────
         if args.use_wandb:
@@ -285,26 +282,24 @@ def run_finetuning(args):
                 "epoch": epoch, 
                 "train_loss": avg_train, 
                 "val_loss": avg_val,
-                "spearman": metrics['spearman'],
-                "recall_at_k": metrics['recall_at_k'],
-                "precision_at_k": metrics['precision_at_k']
+                "spearman": spearman
             })
         if args.use_mlflow:
             mlflow.log_metrics({
                 "train_loss": avg_train,
                 "val_loss": avg_val,
-                "spearman": metrics['spearman'],
-                "recall_at_k": metrics['recall_at_k'],
-                "precision_at_k": metrics['precision_at_k']
+                "spearman": spearman
             }, step=epoch)
 
-        # ─── Check early stopping ───────────────────────────────────────────────
-        if avg_val < best_val_loss:
-            best_val_loss = avg_val
+        # ─── Check early stopping based on Spearman correlation ──────────────────
+        if spearman > best_spearman:
+            best_spearman = spearman
+            best_epoch = epoch
             epochs_no_improve = 0
             # ─── Save best checkpoint ────────────────────────────────────────
             ckpt = args.output_dir / f"{args.group}_best.pth"
             torch.save(model.state_dict(), ckpt)
+            print(f"[INFO] New best Spearman correlation: {spearman:.4f} at epoch {epoch}")
             if args.use_wandb:
                 wandb.save(str(ckpt))
             if args.use_mlflow:
@@ -312,8 +307,11 @@ def run_finetuning(args):
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= args.patience:
-                print(f"[INFO] Early stopping at epoch {epoch} (no improvement for {args.patience} epochs)")
+                print(f"[INFO] Early stopping triggered at epoch {epoch}")
+                print(f"[INFO] Best Spearman correlation: {best_spearman:.4f} achieved at epoch {best_epoch}")
                 break
+            else:
+                print(f"[INFO] No improvement in Spearman correlation for {epochs_no_improve} epochs")
 
         # ─── Periodic saves every 5 epochs ──────────────────────────────────
         if epoch % 5 == 0:
@@ -360,8 +358,6 @@ def run_finetuning(args):
         'train_losses': train_losses,
         'val_losses': val_losses,
         'spearman_scores': spearman_scores,
-        'recall_scores': recall_scores,
-        'precision_scores': precision_scores
     }
 
 def main():
