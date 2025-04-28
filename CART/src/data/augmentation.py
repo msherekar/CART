@@ -56,7 +56,7 @@ def resolve_path(path_str: str) -> Path:
     return get_project_root() / path
 
 
-def run_phmmer(query_fasta: Path, db_fasta: Path, evalue: float = 1e-3) -> Path:
+def run_phmmer(query_fasta: Path, db_fasta: Path, evalue: float = 1e-4) -> Path:
     """
     Run phmmer to search homologs of query in the uniprot database.
     Returns domtblout path.
@@ -121,16 +121,17 @@ def one_hot(seq: str, length: int) -> np.ndarray:
     return arr.flatten()
 
 
-def determine_optimal_k(seqs, wt_seq, min_wt_percentage=0.25, max_k=20):
+def determine_optimal_k(seqs, wt_seq, target_percentage=0.25, max_k=20, tolerance=0.05):
     """
-    Determine optimal K for clustering to ensure at least 25% of sequences
-    are in the wild-type cluster.
+    Determine optimal K for clustering to get as close as possible to target_percentage
+    of sequences in the wild-type cluster.
     
     Args:
         seqs: List of sequences
         wt_seq: Wild-type sequence
-        min_wt_percentage: Minimum percentage of sequences required in WT cluster
+        target_percentage: Target percentage of sequences in WT cluster (default: 0.25)
         max_k: Maximum number of clusters to try
+        tolerance: Acceptable deviation from target percentage
         
     Returns:
         Optimal k value
@@ -145,6 +146,7 @@ def determine_optimal_k(seqs, wt_seq, min_wt_percentage=0.25, max_k=20):
     
     best_k = 1
     best_wt_percentage = 0
+    best_diff = float('inf')
     
     for k in range(2, min(max_k + 1, len(seqs))):
         km = KMeans(n_clusters=k, random_state=0, n_init=10).fit(X)
@@ -155,13 +157,30 @@ def determine_optimal_k(seqs, wt_seq, min_wt_percentage=0.25, max_k=20):
         wt_cluster_size = cluster_counts[wt_cluster]
         wt_percentage = wt_cluster_size / len(seqs)
         
-        # If this clustering achieves the minimum percentage, it's a candidate
-        if wt_percentage >= min_wt_percentage:
+        # Calculate how close we are to target percentage
+        diff = abs(wt_percentage - target_percentage)
+        
+        # Update best k if:
+        # 1. We're closer to target percentage than before
+        # 2. The percentage is within tolerance of target
+        # 3. The percentage is not too high (upper limit)
+        if (diff < best_diff and 
+            abs(wt_percentage - target_percentage) <= tolerance and
+            wt_percentage <= target_percentage + tolerance):
             best_k = k
             best_wt_percentage = wt_percentage
+            best_diff = diff
+            
+        # If we've found a perfect match, stop searching
+        if abs(wt_percentage - target_percentage) < 0.01:
             break
     
-    print(f"Selected k={best_k} with {best_wt_percentage:.1%} sequences in WT cluster")
+    if best_k == 1:
+        print(f"Warning: Could not find k value that achieves {target_percentage:.1%} ± {tolerance:.1%} sequences in WT cluster")
+        print(f"Using k=1 with {best_wt_percentage:.1%} sequences in WT cluster")
+    else:
+        print(f"Selected k={best_k} with {best_wt_percentage:.1%} sequences in WT cluster")
+    
     return best_k
 
 
@@ -381,13 +400,13 @@ def parse_args():
                        help='Path to wild-type CD28 FASTA file (position: 115-220)')
     parser.add_argument('--wt_cd3z', type=str, default='CART/fasta/cd3z.fasta',
                        help='Path to wild-type CD3ζ FASTA file (position: 52-164)')
-    parser.add_argument('--uniprot_db', type=str, default='CART/fasta/uniprot_sprot.fasta',
+    parser.add_argument('--uniprot_db', type=str, default='CART/fasta/uniprot_trembl.fasta',
                        help='Path to Uniprot database FASTA file')
     parser.add_argument('--output_dir', type=str, default='CART/homologs', 
                        help='Directory to save output files (default: CART/homologs)')
     parser.add_argument('--plots_dir', type=str, default=DEFAULT_PLOTS_DIR,
                        help=f'Directory to save plot files (default: {DEFAULT_PLOTS_DIR})')
-    parser.add_argument('--evalue', type=float, default=1e-3, 
+    parser.add_argument('--evalue', type=float, default=1e-4, 
                        help='E-value threshold for HMMER (default: 1e-4)')
     parser.add_argument('--tol', type=float, default=0.25, 
                        help='Length tolerance factor (default: 0.25, i.e., 0.75-1.25×)')
@@ -489,8 +508,8 @@ def run_augmentation():
         seqs3z.append(wt3z)
 
     # Determine optimal K for clustering
-    k_cd28 = determine_optimal_k(seqs28, wt28, min_wt_percentage=args.min_wt_percentage)
-    k_cd3z = determine_optimal_k(seqs3z, wt3z, min_wt_percentage=args.min_wt_percentage)
+    k_cd28 = determine_optimal_k(seqs28, wt28, target_percentage=args.min_wt_percentage)
+    k_cd3z = determine_optimal_k(seqs3z, wt3z, target_percentage=args.min_wt_percentage)
 
     # Cluster sequences
     clusters28, km28, wt_cluster28, X28 = cluster_and_assign_seqs(seqs28, k_cd28, wt28)
