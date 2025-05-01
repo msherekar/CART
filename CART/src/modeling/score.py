@@ -12,13 +12,15 @@ Can be used to evaluate prediction results stored in files or directly process a
 
 import numpy as np
 import argparse
-from pathlib import Path
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
 from scipy.stats import spearmanr
 import json
 
-def get_project_root() -> Path:
+def get_project_root():
     """Get project root directory relative to this file"""
-    return Path(__file__).resolve().parents[3]  # Go up 3 levels from this file
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 def recall_precision_at_k(y_true, y_pred, K):
     """
@@ -42,19 +44,19 @@ def recall_precision_at_k(y_true, y_pred, K):
 
 def parse_args():
     project_root = get_project_root()
-    results_dir = project_root / "CART/predictions"
+    results_dir = os.path.join(project_root, "CART", "predictions")
     
     parser = argparse.ArgumentParser(description="Score predictions with various metrics")
     
     # Input options
     parser.add_argument(
         "--predictions_file", 
-        type=Path, 
+        type=str, 
         help="Path to .npz file containing predictions and actual values"
     )
     parser.add_argument(
         "--predictions_dir", 
-        type=Path, 
+        type=str, 
         default=results_dir,
         help="Directory containing multiple prediction files to evaluate"
     )
@@ -67,7 +69,7 @@ def parse_args():
     # Output options
     parser.add_argument(
         "--output_file", 
-        type=Path, 
+        type=str, 
         help="Path to save results (JSON format)"
     )
     
@@ -113,6 +115,47 @@ def score_predictions(y_true, y_pred, k_values):
         "precision_at_k": precision_at_k
     }
 
+def plot_recall_precision(scores, model_name, output_dir):
+    """
+    Plot Recall@K and Precision@K metrics for different K values
+    
+    Args:
+        scores: Dictionary containing recall_at_k and precision_at_k
+        model_name: Name of the model being evaluated
+        output_dir: Directory to save the plot
+    """
+    plt.figure(figsize=(10, 6))
+    
+    # Get K values and corresponding metrics
+    k_values = sorted(scores['recall_at_k'].keys())
+    recalls = [scores['recall_at_k'][k] for k in k_values]
+    precisions = [scores['precision_at_k'][k] for k in k_values]
+    
+    # Plot Recall and Precision
+    plt.plot(k_values, recalls, 'o-', label='Recall@K', linewidth=2, markersize=8)
+    plt.plot(k_values, precisions, 's-', label='Precision@K', linewidth=2, markersize=8)
+    
+    # Add value labels
+    for k, r, p in zip(k_values, recalls, precisions):
+        plt.text(k, r, f'{r:.2f}', ha='center', va='bottom')
+        plt.text(k, p, f'{p:.2f}', ha='center', va='top')
+    
+    # Customize plot
+    plt.title(f'Recall and Precision Metrics - {model_name}', fontsize=14)
+    plt.xlabel('Top-K', fontsize=12)
+    plt.ylabel('Score', fontsize=12)
+    plt.xticks(k_values, [f'Top-{k}' for k in k_values])
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(fontsize=10)
+    
+    # Adjust layout and save
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, f"{model_name}_recall_precision.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved recall/precision plot to {plot_path}")
+
 def run_score(args):
     """
     Run scoring based on command line arguments
@@ -125,13 +168,17 @@ def run_score(args):
     """
     all_scores = {}
     
+    # Create output directory for plots if it doesn't exist
+    plot_dir = os.path.join(os.path.dirname(args.predictions_dir), "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+    
     # Case 1: Single predictions file
     if args.predictions_file:
         file_path = args.predictions_file
-        if not file_path.is_absolute():
-            file_path = get_project_root() / file_path
+        if not os.path.isabs(file_path):
+            file_path = os.path.join(get_project_root(), file_path)
             
-        if not file_path.exists():
+        if not os.path.exists(file_path):
             raise FileNotFoundError(f"Predictions file not found: {file_path}")
             
         print(f"Scoring predictions from {file_path}")
@@ -162,23 +209,24 @@ def run_score(args):
             return {}
             
         # Score predictions
-        model_name = file_path.stem.replace("_predictions", "")
+        model_name = os.path.splitext(os.path.basename(file_path))[0].replace("_predictions", "")
         all_scores[model_name] = score_predictions(y_true, y_pred, args.k_values)
         
     # Case 2: Directory with multiple prediction files
     elif args.predictions_dir:
         dir_path = args.predictions_dir
-        if not dir_path.is_absolute():
-            dir_path = get_project_root() / dir_path
+        if not os.path.isabs(dir_path):
+            dir_path = os.path.join(get_project_root(), dir_path)
             
-        if not dir_path.exists():
+        if not os.path.exists(dir_path):
             raise FileNotFoundError(f"Predictions directory not found: {dir_path}")
             
         # Get prediction files
         if args.model_names:
-            pred_files = [dir_path / f"{model}_predictions.npz" for model in args.model_names]
+            pred_files = [os.path.join(dir_path, f"{model}_predictions.npz") for model in args.model_names]
         else:
-            pred_files = list(dir_path.glob("*_predictions.npz"))
+            pred_files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) 
+                         if f.endswith('_predictions.npz')]
             
         if not pred_files:
             print(f"No prediction files found in {dir_path}")
@@ -188,7 +236,7 @@ def run_score(args):
         
         # Score each model
         for file_path in pred_files:
-            if not file_path.exists():
+            if not os.path.exists(file_path):
                 print(f"Warning: File not found: {file_path}")
                 continue
                 
@@ -220,10 +268,10 @@ def run_score(args):
                 continue
                 
             # Score predictions
-            model_name = file_path.stem.replace("_predictions", "")
+            model_name = os.path.splitext(os.path.basename(file_path))[0].replace("_predictions", "")
             all_scores[model_name] = score_predictions(y_true, y_pred, args.k_values)
     
-    # Print scores to console
+    # Print scores to console and generate plots
     for model_name, scores in all_scores.items():
         print(f"\nScores for {model_name}:")
         print(f"  Spearman's ρ  : {scores['spearman_rho']:.3f} (p={scores['spearman_pval']:.3g})")
@@ -232,15 +280,18 @@ def run_score(args):
             p = scores['precision_at_k'][k]
             print(f"  Recall@{k}      : {r:.3f}")
             print(f"  Precision@{k}   : {p:.3f}")
+        
+        # Generate recall/precision plot
+        plot_recall_precision(scores, model_name, plot_dir)
     
     # Save results to file if specified
     if args.output_file:
         output_path = args.output_file
-        if not output_path.is_absolute():
-            output_path = get_project_root() / output_path
+        if not os.path.isabs(output_path):
+            output_path = os.path.join(get_project_root(), output_path)
             
         # Create parent directory if it doesn't exist
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
         # Convert to serializable format
         serializable_scores = {}
