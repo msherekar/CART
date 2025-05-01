@@ -8,12 +8,16 @@ Supports CUDA, MPS, or CPU via --device.
 Skips any sequence longer than the model's maximum allowable length.
 """
 import argparse
-from pathlib import Path
+import os
+import sys
 
 import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 from Bio import SeqIO
+
+# Get the project root directory (3 levels up from this file)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 def select_device(choice: str) -> torch.device:
     if choice == "auto":
@@ -28,21 +32,21 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--fasta",
-        type=Path,
-        required=True,
-        help="Input FASTA file with one sequence per record",
+        type=str,
+        default="CART/mutants/CAR_mutants.fasta",
+        help="Input FASTA file with one sequence per record (relative to project root)",
     )
     parser.add_argument(
         "--model",
         type=str,
-        required=True,
+        default="facebook/esm2_t6_8M_UR50D",
         help="HuggingFace model name or path (e.g. facebook/esm2_t6_8M_UR50D or ./fine_tuned_models/high_best)",
     )
     parser.add_argument(
-        "--out-emb",
-        type=Path,
-        default=Path("embeddings.npy"),
-        help="Output .npy file to save embeddings",
+        "--out_emb",     
+        type=str,
+        default="CART/embeddings/esm2_t6_8M_UR50D_embeddings.npy",
+        help="Output .npy file to save embeddings (relative to project root)",
     )
     parser.add_argument(
         "--device",
@@ -52,21 +56,43 @@ def parse_args():
     )
     return parser.parse_args()
 
-def run_embeddings(args):
-    device = select_device(args.device)
+def run_embeddings(fasta_path, output_path, model="facebook/esm2_t6_8M_UR50D", device="auto"):
+    """
+    Extract embeddings from sequences in a FASTA file.
+    
+    Args:
+        fasta_path (str): Path to input FASTA file (relative to project root)
+        output_path (str): Path to save output embeddings (.npy) (relative to project root)
+        model (str): Model name or path
+        device (str): Compute device ("auto", "cuda", "mps", "cpu")
+        
+    Returns:
+        np.ndarray: Embeddings array of shape (n_sequences, hidden_size)
+    """
+    # Convert relative paths to absolute paths
+    fasta_path = os.path.join(project_root, fasta_path)
+    output_path = os.path.join(project_root, output_path)
+    
+    # Print paths for debugging
+    print(f"[INFO] Input FASTA: {fasta_path}")
+    print(f"[INFO] Output embeddings: {output_path}")
+    
+    device = select_device(device)
     print(f"[INFO] Using device: {device}")
 
     # Load tokenizer & model (with hidden states)
-    if args.model.startswith("/Users/mukulsherekar"):
-        # Assuming local path for finetuned model
+    if not model.startswith(("facebook/", "http://", "https://")):
+        # Local path
+        model_path = model
+        # Use default pretrained tokenizer
         tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D", do_lower_case=False)
-        model = AutoModelForMaskedLM.from_pretrained("facebook/esm2_t6_8M_UR50D", output_hidden_states=True)
-        model.load_state_dict(torch.load(args.model, map_location=device))
+        model_obj = AutoModelForMaskedLM.from_pretrained("facebook/esm2_t6_8M_UR50D", output_hidden_states=True)
+        model_obj.load_state_dict(torch.load(model_path, map_location=device))
     else:
         # Load from Hugging Face Hub
-        tokenizer = AutoTokenizer.from_pretrained(args.model, do_lower_case=False)
-        model = AutoModelForMaskedLM.from_pretrained(args.model, output_hidden_states=True)
-    model.to(device).eval()
+        tokenizer = AutoTokenizer.from_pretrained(model, do_lower_case=False)
+        model_obj = AutoModelForMaskedLM.from_pretrained(model, output_hidden_states=True)
+    model_obj.to(device).eval()
 
     # Correctly determine model's max tokens and compute max sequence length
     max_tokens = min(tokenizer.model_max_length, 512)  # Set a reasonable upper limit
@@ -74,10 +100,14 @@ def run_embeddings(args):
     print(f"[INFO] Model max tokens     = {max_tokens}")
     print(f"[INFO] Max amino-acid length = {max_seq_len}")
 
+    # Ensure input file exists
+    if not os.path.exists(fasta_path):
+        raise FileNotFoundError(f"Input FASTA file not found: {fasta_path}")
+
     embeddings = []
     seq_ids = []
 
-    for rec in SeqIO.parse(str(args.fasta), "fasta"):
+    for rec in SeqIO.parse(fasta_path, "fasta"):
         seq = str(rec.seq)
         L = len(seq)
         if L > max_seq_len:
@@ -95,7 +125,7 @@ def run_embeddings(args):
         attention_mask = enc["attention_mask"].to(device)
 
         with torch.no_grad():
-            outputs = model(
+            outputs = model_obj(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
@@ -111,19 +141,25 @@ def run_embeddings(args):
         raise RuntimeError("No sequences processed; all were too long or FASTA was empty.")
 
     embeddings = np.vstack(embeddings)  # (n_seqs, H)
-    np.save(args.out_emb, embeddings)
-    print(f"[INFO] Saved embeddings array {embeddings.shape} to {args.out_emb}")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    np.save(output_path, embeddings)
+    print(f"[INFO] Saved embeddings array {embeddings.shape} to {output_path}")
 
     # Optionally, save seq_ids for later mapping
-    id_file = args.out_emb.with_suffix(".ids.txt")
+    id_file = os.path.splitext(output_path)[0] + ".ids.txt"
     with open(id_file, "w") as fh:
         for sid in seq_ids:
             fh.write(f"{sid}\n")
     print(f"[INFO] Saved sequence IDs to {id_file}")
+    
+    return embeddings
 
 def main():
     args = parse_args()
-    run_embeddings(args)
+    run_embeddings(args.fasta, args.out_emb, args.model, args.device)
 
 if __name__ == "__main__":
     main()
