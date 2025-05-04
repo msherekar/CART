@@ -94,9 +94,9 @@ def nested_ridge_cv(X: np.ndarray, y: np.ndarray, alphas, outer_cv, inner_cv=3):
 
     return all_y_tests, all_y_preds, spearman_scores, best_alphas
 
-def parse_args():
+def parse_args(args_list=None):
     project_root = get_project_root()
-    plots_dir = project_root / "CART/plots"
+    plots_dir = project_root / "CART" / "output" / "plots"
     
     parser = argparse.ArgumentParser(description="Evaluate embeddings and generate comparison plots")
     parser.add_argument(
@@ -139,7 +139,13 @@ def parse_args():
         default=3, 
         help="Number of splits for inner cross-validation"
     )
-    return parser.parse_args()
+    
+    # Only parse command line arguments if this module is run directly
+    if args_list is None and __name__ == "__main__":
+        return parser.parse_args()
+    else:
+        # When imported, use the provided args_list or an empty list
+        return parser.parse_args(args_list or [])
 
 def run_evaluation(args):
     """
@@ -253,12 +259,21 @@ def run_evaluation(args):
         np.save(spearman_file, np.array(res["spearman_rhos"]))
         print(f"Saved Spearman scores to {spearman_file}")
         
+        # Find maximum length among all folds
+        max_len = max(len(y_test) for y_test in res["y_tests"])
+        
+        # Pad arrays to make them the same length
+        padded_y_tests = np.array([np.pad(y_test, (0, max_len - len(y_test)), mode='constant', constant_values=np.nan) 
+                                 for y_test in res["y_tests"]])
+        padded_y_preds = np.array([np.pad(y_pred, (0, max_len - len(y_pred)), mode='constant', constant_values=np.nan) 
+                                 for y_pred in res["y_preds"]])
+        
         # Save predictions and labels
         pred_file = results_dir / f"{model_name}_predictions.npz"
         np.savez(
             pred_file,
-            y_tests=np.array(res["y_tests"]),
-            y_preds=np.array(res["y_preds"]),
+            y_tests=padded_y_tests,
+            y_preds=padded_y_preds,
             spearman=np.array(res["spearman_rhos"]),
             best_alphas=np.array(res["best_alphas"]),
             recall_at_5=np.array(res["recall_at_5"]),
