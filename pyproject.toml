@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=75.8.2", "wheel>=0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "CART"
+version = "0.1.0"
+description = "AI pipeline for CAR-T sequence augmentation, modeling, and prediction"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name="Mukul Sherekar" }
+]
+license = { text="Private" }
+dependencies = [
+    # Core dependencies
+    "numpy>=1.26.4",
+    "scipy>=1.15.2",
+    "scikit-learn>=1.6.1",
+    "pandas>=2.2.3",
+    "matplotlib>=3.10.1",
+    "seaborn>=0.13.2",
+    "typer>=0.12.3",
+    "tqdm>=4.67.1",
+    "biopython>=1.85",
+    # Deep learning
+    "torch>=2.6.0",
+    "transformers>=4.51.3",
+    # Visualization
+    "plotly>=5.3.0",
+    "umap-learn>=0.5.2",
+    # Experiment tracking
+    "mlflow>=2.11.3",
+    "wandb>=0.17.4",
+    # Additional dependencies
+    "fastapi>=0.115.12",
+    "uvicorn>=0.34.1",
+    "gunicorn>=21.2.0",
+    "pydantic>=2.7.0",
+    "requests>=2.32.3",
+    "pytest>=8.3.5",
+    "pytest-cov>=2.12.0",
+    "hmmer>=3.4.0.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/msherekar/CART"
+
+[project.entry-points.console_scripts]
+cart = "CART.src.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --cov=CART --cov-report=term-missing"
