@@ -16,26 +16,21 @@ import json
 import argparse
 import matplotlib.pyplot as plt
 
-def get_project_root():
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-def parse_args():
-    # Define project root for relative paths
-    project_root = get_project_root()
+
+def parse_args(args_list=None):
+    parser = argparse.ArgumentParser(description="Compute pseudo-log-likelihoods for CAR-T sequences")
     
-    parser = argparse.ArgumentParser(
-        description="Compute pseudo-log-likelihood scores for protein sequences"
-    )
+    # Get project root for relative paths
+    #project_root = Path(__file__).parent.parent.parent.resolve()
     
-    # Input file
+    # Required arguments with default paths
     parser.add_argument(
         "--mutant_fasta", 
-        type=str, 
-        default=os.path.join(project_root, "CART", "mutants", "CAR_mutants.fasta"), 
-        help="FASTA file containing sequences to evaluate"
+        type=Path, 
+        default=Path('output/mutants/CAR_mutants.fasta'),
+        help="Path to mutant FASTA file, relative to project root"
     )
-    
-    # Model paths
     parser.add_argument(
         "--pretrained", 
         type=str, 
@@ -44,18 +39,18 @@ def parse_args():
     )
     parser.add_argument(
         "--finetuned_high", 
-        type=str, 
-        default=os.path.join(project_root, "CART", "checkpoints", "high_best.pth"), 
+        type=Path, 
+        default=Path('../../output/models/high'), 
         help="Path to high-diversity fine-tuned model"
     )
     parser.add_argument(
         "--finetuned_low", 
-        type=str, 
-        default=os.path.join(project_root, "CART", "checkpoints", "low_best.pth"), 
+        type=Path, 
+        default=Path('../../output/models/low'), 
         help="Path to low-diversity fine-tuned model"
     )
     
-    # Processing options
+    # Optional arguments
     parser.add_argument(
         "--device", 
         type=str, 
@@ -67,24 +62,24 @@ def parse_args():
         "--batch_size", 
         type=int, 
         default=4, 
-        help="Batch size for processing sequences"
+        help="Batch size for inference"
     )
     parser.add_argument(
         "--save_interval", 
         type=int, 
         default=10, 
-        help="Save results every N sequences"
+        help="Save interval for checkpoints"
     )
     parser.add_argument(
         "--max_tokens", 
         type=int, 
         default=512, 
-        help="Maximum tokens for tokenizer"
+        help="Maximum number of tokens per sequence"
     )
     parser.add_argument(
         "--output_dir", 
-        type=str, 
-        default=os.path.join(project_root, "CART", "results"), 
+        type=Path, 
+        default=Path('../../output/results'), 
         help="Directory to save results"
     )
     parser.add_argument(
@@ -96,10 +91,15 @@ def parse_args():
         "--test_size", 
         type=int, 
         default=20, 
-        help="Number of sequences to use when use_subset is True"
+        help="Number of sequences to use for testing"
     )
     
-    return parser.parse_args()
+    # Only parse command line arguments if this module is run directly
+    if args_list is None and __name__ == "__main__":
+        return parser.parse_args()
+    else:
+        # When imported, use the provided args_list or an empty list
+        return parser.parse_args(args_list or [])
 
 def select_device(choice: str) -> torch.device:
     if choice == "auto":
@@ -189,7 +189,7 @@ def load_progress(model_name, total_sequences, output_dir):
     # Start fresh
     return [], 0
 
-def plot_pll_results(results_dict, output_dir):
+def plot_pll_results(results_dict, output_path):
     """Plot bar graph comparing PLL scores across models"""
     plt.figure(figsize=(10, 6))
     
@@ -212,11 +212,14 @@ def plot_pll_results(results_dict, output_dir):
     plt.xlabel('Model')
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     
+    # Ensure the output directory exists
+    output_dir = os.path.dirname(output_path)
+    os.makedirs(output_dir, exist_ok=True)
+    
     # Save the plot
-    plot_path = Path(output_dir) / 'pll_comparison.png'
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"[INFO] Plot saved to {plot_path}")
+    print(f"[INFO] Plot saved to {output_path}")
 
 def load_model_and_tokenizer(model_name, device):
     """Load model and tokenizer based on model name"""
@@ -227,9 +230,9 @@ def load_model_and_tokenizer(model_name, device):
     else:
         # Load finetuned model
         if model_name == "finetuned_high":
-            path = os.path.join(get_project_root(), "checkpoints", "high_best.pth")
+            path = os.path.join(get_project_root(), "output", "models", "high")
         elif model_name == "finetuned_low":
-            path = os.path.join(get_project_root(), "checkpoints", "low_best.pth")
+            path = os.path.join(get_project_root(), "output", "models", "low")
         else:
             raise ValueError(f"Unknown model name: {model_name}")
             
@@ -238,74 +241,123 @@ def load_model_and_tokenizer(model_name, device):
             
         print(f"Loading model from {path}")
             
-        # First load the model architecture
-        model = AutoModelForMaskedLM.from_pretrained("facebook/esm2_t6_8M_UR50D")
-        tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D")
-        
-        # Then load the state dict with proper device handling
-        try:
-            # Try loading directly to CPU first
-            state_dict = torch.load(path, map_location='cpu')
-            model.load_state_dict(state_dict)
-        except Exception as e:
-            print(f"Warning: Could not load model with CPU map_location: {e}")
-            try:
-                # Try loading without map_location
-                state_dict = torch.load(path)
-                model.load_state_dict(state_dict)
-            except Exception as e:
-                print(f"Error loading model: {e}")
-                raise
+        # Load the model directly using from_pretrained
+        model = AutoModelForMaskedLM.from_pretrained(path)
+        tokenizer = AutoTokenizer.from_pretrained(path)
     
     # Move model to device after loading
     model = model.to(device)
     return model, tokenizer
 
+def compute_plls(sequences, model, tokenizer, device, batch_size, max_tokens):
+    """Compute pseudo-log-likelihoods for a batch of sequences."""
+    plls = []
+    for seq in sequences:
+        # Tokenize the sequence
+        enc = tokenizer(
+            seq,
+            return_tensors="pt",
+            truncation=True,
+            padding=False,
+            max_length=max_tokens
+        )
+        input_ids = enc.input_ids.to(device)
+        attention_mask = enc.attention_mask.to(device)
+        L = input_ids.size(1)
+        
+        # For each position, mask & get log-prob of true token
+        log_probs = []
+        for i in range(L):
+            masked = input_ids.clone()
+            masked[0, i] = tokenizer.mask_token_id
+            with torch.no_grad():
+                outputs = model(input_ids=masked, attention_mask=attention_mask)
+                logits = outputs.logits
+            log_soft = torch.log_softmax(logits[0, i], dim=-1)
+            true_id = input_ids[0, i]
+            log_p = log_soft[true_id].item()
+            log_probs.append(log_p)
+        
+        plls.append(float(np.mean(log_probs)))
+    return plls
+
 def run_pll(args):
-    """Run PLL computation for all models"""
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else 
-                         "mps" if torch.backends.mps.is_available() else "cpu")
+    root = Path(__file__).parent.parent.parent.parent.resolve()
+   # now resolve the FASTA path:
+    mutant_fasta = args.mutant_fasta
+    if not mutant_fasta.is_absolute():
+        mutant_fasta = root / mutant_fasta
+
+    # same for output_dir, finetuned_high, etc.
+    output_dir = args.output_dir
+    if not output_dir.is_absolute():
+        output_dir = root / output_dir
+
+    
+    """Run PLL computation pipeline."""
+    # Select device
+    device = select_device(args.device)
     print(f"Using device: {device}")
     
-    # Load FASTA file
-    fasta_path = args.mutant_fasta
-    if not os.path.exists(fasta_path):
-        raise FileNotFoundError(f"FASTA file not found: {fasta_path}")
+    # Load sequences
+    sequences = []
+    for record in SeqIO.parse(mutant_fasta, "fasta"):
+        sequences.append(str(record.seq))
+    print(f"Loaded {len(sequences)} sequences from {mutant_fasta}")
     
-    sequences = [str(rec.seq) for rec in SeqIO.parse(fasta_path, "fasta")]
-    print(f"Loaded {len(sequences)} sequences from {fasta_path}")
-    
-    # Process each model
-    all_results = {}
-    for model_name in ["pretrained", "finetuned_high", "finetuned_low"]:
+    # Process with each model
+    pll_results = {}
+    for model_name in ['pretrained', 'finetuned_high', 'finetuned_low']:
         print(f"\n[INFO] Processing with {model_name} model")
         print(f"[INFO] Loading {model_name} model and tokenizer...")
         
         try:
-            model, tokenizer = load_model_and_tokenizer(model_name, device)
-            results = []
+            if model_name == 'pretrained':
+                model_path = args.pretrained
+                print(f"Loading pretrained model from {model_path}")
+            elif model_name == 'finetuned_high':
+                model_path = args.finetuned_high
+                print(f"Loading finetuned high-diversity model from {model_path}")
+            else:
+                model_path = args.finetuned_low
+                print(f"Loading finetuned low-diversity model from {model_path}")
+            if os.path.exists(model_path):
+                print(f"Loading model from {model_path}")
+                # Load the model directly using from_pretrained
+                model = AutoModelForMaskedLM.from_pretrained(model_path)
+                tokenizer = AutoTokenizer.from_pretrained(model_path)
+            else:
+                print(f"Loading model from Hugging Face Hub: {model_path}")
+                model = AutoModelForMaskedLM.from_pretrained(model_path)
+                tokenizer = AutoTokenizer.from_pretrained(model_path)
+            
+            model = model.to(device)
+            model.eval()
+            
+            # Compute PLLs using the existing compute_pll function
+            plls = []
             for seq in sequences:
                 pll = compute_pll(seq, model, tokenizer, device, args.max_tokens)
-                results.append(pll)
+                plls.append(pll)
             
-            all_results[model_name] = results
+            pll_results[model_name] = plls
             
             # Save results
             output_path = os.path.join(args.output_dir, f"{model_name}_pll.npy")
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            np.save(output_path, results)
+            os.makedirs(args.output_dir, exist_ok=True)
+            np.save(output_path, plls)
             print(f"Saved PLL results to {output_path}")
             
         except Exception as e:
-            print(f"Error processing {model_name}: {e}")
+            print(f"Warning: Could not load model with CPU map_location: {str(e)}")
+            print(f"Error loading model: {str(e)}")
+            print(f"Error processing {model_name}: {str(e)}")
             continue
     
-    # Generate plots
-    if all_results:
-        plot_pll_results(all_results, args.output_dir)
-    else:
-        print("No results to plot")
+    # Plot comparison if we have results
+    if pll_results:
+        plot_path = root / 'output' / 'results' / 'pll_comparison.png'
+        plot_pll_results(pll_results, plot_path)
 
 def main():
     args = parse_args()
