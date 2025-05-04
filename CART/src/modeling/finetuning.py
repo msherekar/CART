@@ -10,13 +10,17 @@ Adds:
 """
 import argparse
 import os
-import random
 from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.optim import AdamW
-from transformers import (AutoTokenizer,AutoModelForMaskedLM,DataCollatorForLanguageModeling,get_linear_schedule_with_warmup)
+from transformers import (
+    AutoTokenizer,
+    AutoModelForMaskedLM,
+    DataCollatorForLanguageModeling,
+    get_linear_schedule_with_warmup,
+)
 from Bio import SeqIO
 import wandb
 import mlflow
@@ -24,6 +28,61 @@ import numpy as np
 from scipy.stats import spearmanr
 import matplotlib.pyplot as plt
 import pandas as pd
+
+
+def parse_args(args_list=None):
+    parser = argparse.ArgumentParser(description="Fine-tune ESM2 model on CAR-T sequences")
+
+    # Input FASTA files
+    parser.add_argument("--high_fasta",type=Path,default=Path('../../output/augmented/high_diversity.fasta'),help="Path to high-diversity FASTA file")
+    parser.add_argument("--low_fasta",type=Path,default=Path('../../output/augmented/low_diversity.fasta'),help="Path to low-diversity FASTA file")
+    parser.add_argument("--groups",nargs='+',choices=["high","low"],default=["high","low"],help="One or more groups to fine-tune (default: both)")
+    parser.add_argument("--output_dir",type=Path,default=Path('../../output/models'),help="Directory to save fine-tuned models")
+    parser.add_argument("--device",type=str,choices=["auto","cuda","mps","cpu"],default="auto",help="Compute device to use")
+    parser.add_argument("--batch_size",type=int,default=32,help="Training batch size")
+    parser.add_argument("--max_length",type=int,default=256,help="Maximum sequence length")
+    parser.add_argument("--grad_accum",type=int,default=4,help="Gradient accumulation steps")
+    parser.add_argument("--no_pin_memory",action="store_true",help="Disable pin memory for data loading")
+    parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate")
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="facebook/esm2_t6_8M_UR50D",
+        help="Model name or path"
+    )
+    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum number of epochs")
+    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience")
+    parser.add_argument(
+        "--top_k_percent",
+        type=float,
+        default=25.0,
+        help="Top K percent for evaluation"
+    )
+
+    # Logging options
+    parser.add_argument("--use_wandb", action="store_true", help="Use Weights & Biases")
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="esm2-cart",
+        help="Weights & Biases project name"
+    )
+    parser.add_argument("--use_mlflow", action="store_true", help="Use MLflow")
+    parser.add_argument(
+        "--mlflow_experiment",
+        type=str,
+        default="esm2-cart",
+        help="MLflow experiment name"
+    )
+    parser.add_argument(
+        "--view_mlflow", action="store_true", help="View MLflow results"
+    )
+
+    if args_list is None and __name__ == "__main__":
+        return parser.parse_args()
+    else:
+        return parser.parse_args(args_list)
+
 
 class SequenceDataset(Dataset):
     def __init__(self, fasta_path: Path, tokenizer, max_length: int = 512):
@@ -47,6 +106,7 @@ class SequenceDataset(Dataset):
             "attention_mask": enc["attention_mask"].squeeze(0),
         }
 
+
 def select_device(choice: str) -> torch.device:
     if choice == "auto":
         if torch.cuda.is_available():
@@ -56,313 +116,175 @@ def select_device(choice: str) -> torch.device:
         return torch.device("cpu")
     return torch.device(choice)
 
-def parse_args():
-    # Define project root for relative paths
-    project_root = Path("/Users/mukulsherekar/pythonProject/CART-Project")
-    checkpoints_dir = project_root / "checkpoints"
-    mlruns_dir = project_root / "mlruns"
-    wandb_dir = project_root / "wandb"
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--high_fasta",  type=Path, default=project_root / "CART/homologs/high_diversity.fasta")
-    parser.add_argument("--low_fasta",   type=Path, default=project_root / "CART/homologs/low_diversity.fasta")
-    parser.add_argument("--group",       choices=["high", "low"], required=True, help="Which set to fine-tune on")                        
-    parser.add_argument("--output_dir",  type=Path, default=checkpoints_dir, help="Directory to save models")
-    parser.add_argument("--device",      choices=["auto", "cuda", "mps", "cpu"], default="mps", help="Device to run on")
-    parser.add_argument("--batch_size",  type=int, default=32, help="Batch size for training and validation")
-    parser.add_argument("--max_length",  type=int, default=256, help="Maximum sequence length")
-    parser.add_argument("--grad_accum",  type=int, default=4, help="Gradient accumulation steps")
-    parser.add_argument("--no_pin_memory", action="store_true", help="Disable pin_memory in DataLoader to save memory")
-    parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate for the optimizer")
-    # Model selection
-    parser.add_argument("--model_name", type=str, default="facebook/esm2_t6_8M_UR50D", 
-                       help="ESM2 model to use (default: 8M parameter model)")
-    # Training parameters
-    parser.add_argument("--max_epochs", type=int, default=50, help="Maximum number of epochs")
-    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (in epochs)")
-    # Evaluation parameters
-    parser.add_argument("--top_k_percent", type=float, default=25.0, 
-                       help="Top percentage of sequences to consider for binary evaluation")
-    # wandb & mlflow flags
-    parser.add_argument("--use_wandb", action="store_true", help="Log to Weights & Biases")
-    parser.add_argument("--wandb_project", type=str, default="esm2-cart", help="wandb project name")
-    parser.add_argument("--use_mlflow", action="store_true", help="Log to MLflow")
-    parser.add_argument("--mlflow_experiment", type=str, default="esm2-cart", help="mlflow experiment name")
-    parser.add_argument("--view_mlflow", action="store_true", help="Start MLflow UI after training")
-    
-    return parser.parse_args()
 
 def compute_metrics(model, val_loader, device):
     """Compute Spearman correlation between predictions and targets."""
     model.eval()
-    all_predictions = []
-    all_targets = []
-    
+    all_preds, all_targs = [], []
     with torch.no_grad():
         for batch in val_loader:
-            inputs = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**inputs)
-            predictions = outputs.logits.argmax(dim=-1)
-            targets = inputs['labels']
-            
-            # Filter out masked tokens (-100)
-            mask = targets != -100
-            predictions = predictions[mask]
-            targets = targets[mask]
-            
-            all_predictions.extend(predictions.cpu().numpy())
-            all_targets.extend(targets.cpu().numpy())
-    
-    # Compute Spearman correlation
-    spearman = spearmanr(all_predictions, all_targets)[0]
-    return spearman
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+            preds = outputs.logits.argmax(dim=-1)
+            targs = batch['labels']
+            mask = targs != -100
+            all_preds.extend(preds[mask].cpu().numpy())
+            all_targs.extend(targs[mask].cpu().numpy())
+    return spearmanr(all_preds, all_targs)[0]
 
-def plot_metrics(train_losses, val_losses, spearman_scores, output_dir, group):
-    """Plot training metrics and save to file."""
+
+def plot_metrics(train_losses, val_losses, spearman_scores, output_dir: Path, group: str):
     epochs = range(1, len(train_losses) + 1)
-    
-    # Create figure with two subplots
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-    
-    # Plot losses
-    ax1.plot(epochs, train_losses, 'b-', label='Training Loss')
-    ax1.plot(epochs, val_losses, 'r-', label='Validation Loss')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss')
-    ax1.set_title(f'Training and Validation Loss ({group} diversity)')
-    ax1.legend()
-    ax1.grid(True)
-    
-    # Plot Spearman correlation
-    ax2.plot(epochs, spearman_scores, 'g-')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Spearman Correlation')
-    ax2.set_title(f'Spearman Correlation ({group} diversity)')
+    ax1.plot(epochs, train_losses, label='Train Loss')
+    ax1.plot(epochs, val_losses, label='Val Loss')
+    ax1.set(title=f'Loss ({group})', xlabel='Epoch', ylabel='Loss')
+    ax1.legend(); ax1.grid(True)
+    ax2.plot(epochs, spearman_scores, label='Spearman')
+    ax2.set(title=f'Spearman ({group})', xlabel='Epoch', ylabel='Spearman')
     ax2.grid(True)
-    
-    # Adjust layout and save
     plt.tight_layout()
     plt.savefig(output_dir / f'{group}_metrics.png')
     plt.close()
 
-def run_finetuning(args):
-    # Define project root for relative paths
-    project_root = Path("/Users/mukulsherekar/pythonProject/CART-Project/CART")
-    checkpoints_dir = project_root / "checkpoints"
-    mlruns_dir = project_root / "mlruns"
-    wandb_dir = project_root / "wandb"
+
+def run_finetuning(args, group: str):
+    """Run fine-tuning for a specified diversity group."""
+    root = Path(__file__).parent.parent.resolve()
+    checkpoints_dir = root / "output" / "checkpoints"
+    mlruns_dir = root / "output" / "mlruns"
+    wandb_dir = root / "output" / "wandb"
 
     device = select_device(args.device)
     print(f"[INFO] Using device: {device}")
 
-    # ─── Init wandb ──────────────────────────────────────────────────────────────
-    if args.use_wandb:
-        if wandb is None:
-            raise ImportError("wandb not installed; `pip install wandb` to use --use_wandb")
-        # Ensure wandb directory exists
-        wandb_dir.mkdir(parents=True, exist_ok=True)
-        # Set WANDB_DIR environment variable to specify where to store W&B files
-        os.environ["WANDB_DIR"] = str(wandb_dir)
-        wandb.init(
-            project=args.wandb_project,
-            name=f"{args.group}_finetune",
-            config=vars(args),
-        )
+    is_high = (group == "high")
+    model_dir = args.output_dir / group
+    if model_dir.exists():
+        print(f"[INFO] Model dir exists: {model_dir}, clearing...")
+        for f in model_dir.glob('*'):
+            if f.is_file(): f.unlink()
+    else:
+        model_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] Saving models under: {model_dir}")
 
-    # ─── Init MLflow ────────────────────────────────────────────────────────────
+    # W&B setup
+    if args.use_wandb:
+        os.environ["WANDB_DIR"] = str(wandb_dir)
+        wandb.init(project=args.wandb_project, name=f"{group}_finetune", config=vars(args))
+
+    # MLflow setup
     if args.use_mlflow:
-        if mlflow is None:
-            raise ImportError("mlflow not installed; `pip install mlflow` to use --use_mlflow")
-        # Ensure mlruns directory exists
-        mlruns_dir.mkdir(parents=True, exist_ok=True)
-        # Set MLFLOW_TRACKING_URI environment variable to store runs in project directory
         os.environ["MLFLOW_TRACKING_URI"] = f"file://{mlruns_dir}"
         mlflow.set_experiment(args.mlflow_experiment)
-        mlflow.start_run(run_name=f"{args.group}_finetune")
-        # log hyperparameters
+        mlflow.start_run(run_name=f"{group}_finetune")
         mlflow.log_params({
-            "group": args.group,
+            "group": group,
             "lr": args.learning_rate,
             "batch_size": args.batch_size,
             "epochs": args.max_epochs,
             "device": str(device),
             "patience": args.patience,
-            "max_length": args.max_length,
-            "grad_accum": args.grad_accum,
         })
 
-    # ─── Prepare tokenizer + dataset ──────────────────────────────────────────────
-    print(f"[INFO] Loading model and tokenizer: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, do_lower_case=False)
-    model = AutoModelForMaskedLM.from_pretrained(args.model_name)
-    model.to(device)
-
-    fasta = args.high_fasta if args.group == "high" else args.low_fasta
+    # Data + model
+    print(f"[INFO] Loading {args.model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    model = AutoModelForMaskedLM.from_pretrained(args.model_name).to(device)
+    fasta = args.high_fasta if is_high else args.low_fasta
     print(f"[INFO] Loading sequences from: {fasta}")
     full_ds = SequenceDataset(fasta, tokenizer, max_length=args.max_length)
     train_size = int(0.8 * len(full_ds))
-    val_size   = len(full_ds) - train_size
-    train_ds, val_ds = random_split(
-        full_ds, [train_size, val_size], generator=torch.Generator().manual_seed(42)
-    )
+    val_size = len(full_ds) - train_size
+    train_ds, val_ds = random_split(full_ds, [train_size, val_size],
+                                     generator=torch.Generator().manual_seed(42))
+    print(f"[INFO] Dataset sizes — train: {len(train_ds)}, val: {len(val_ds)}")
 
-    print(f"[INFO] Dataset sizes - Train: {len(train_ds)}, Val: {len(val_ds)}")
+    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm_probability=0.15)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              collate_fn=data_collator, num_workers=2,
+                              pin_memory=not args.no_pin_memory)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                            collate_fn=data_collator, num_workers=2,
+                            pin_memory=not args.no_pin_memory)
 
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer, mlm=True, mlm_probability=0.15
-    )
-    train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
-        collate_fn=data_collator, num_workers=2, pin_memory=not args.no_pin_memory
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False,
-        collate_fn=data_collator, num_workers=2, pin_memory=not args.no_pin_memory
-    )
-
-    # ─── Load optimizer and scheduler ────────────────────────────────────────
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
     total_steps = len(train_loader) * args.max_epochs
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
-    
-    # Ensure checkpoint directory exists
+    scheduler = get_linear_schedule_with_warmup(optimizer, 0, total_steps)
+
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Track metrics
-    train_losses = []
-    val_losses = []
-    spearman_scores = []
-    
-    best_spearman = float('-inf')  # Initialize with negative infinity since we want to maximize Spearman
-    epochs_no_improve = 0
-    best_epoch = 0
-    
-    print(f"[INFO] Starting training for {args.max_epochs} epochs")
-    print(f"[INFO] Early stopping: Will stop if no improvement in Spearman correlation for {args.patience} epochs")
-    
+    train_losses, val_losses, spearman_scores = [], [], []
+    best_spear, no_improve, best_ep = float('-inf'), 0, 0
+
     for epoch in range(1, args.max_epochs + 1):
         model.train()
-        train_loss = 0.0
-        for batch_idx, batch in enumerate(train_loader):
+        running_loss = 0.0
+        for i, batch in enumerate(train_loader):
             batch = {k: v.to(device) for k, v in batch.items()}
-            loss = model(**batch).loss
-            # Scale the loss to account for gradient accumulation
-            loss = loss / args.grad_accum
+            loss = model(**batch).loss / args.grad_accum
             loss.backward()
-            
-            # Only update weights after accumulating gradients for specified steps
-            if (batch_idx + 1) % args.grad_accum == 0 or batch_idx == len(train_loader) - 1:
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                
-            train_loss += loss.item() * args.grad_accum
-        avg_train = train_loss / len(train_loader)
+            if (i + 1) % args.grad_accum == 0 or i == len(train_loader) - 1:
+                optimizer.step(); scheduler.step(); optimizer.zero_grad()
+            running_loss += loss.item() * args.grad_accum
+        avg_train = running_loss / len(train_loader)
         train_losses.append(avg_train)
 
         model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for batch in val_loader:
-                batch = {k: v.to(device) for k, v in batch.items()}
-                val_loss += model(**batch).loss.item()
-        avg_val = val_loss / len(val_loader)
-        val_losses.append(avg_val)
+        val_loss = sum(model(**{k: v.to(device) for k, v in b.items()}).loss.item()
+                       for b in val_loader) / len(val_loader)
+        val_losses.append(val_loss)
 
-        # Compute metrics
-        spearman = compute_metrics(model, val_loader, device)
-        spearman_scores.append(spearman)
-        
-        print(f"Epoch {epoch:2d}  Train: {avg_train:.4f}  Val: {avg_val:.4f}  Spearman: {spearman:.4f}")
+        spear = compute_metrics(model, val_loader, device)
+        spearman_scores.append(spear)
+        print(f"Epoch {epoch} — train: {avg_train:.4f}, val: {val_loss:.4f}, spearman: {spear:.4f}")
 
-        # ─── Log metrics ────────────────────────────────────────────────────────
+        # Logging
         if args.use_wandb:
-            wandb.log({
-                "epoch": epoch, 
-                "train_loss": avg_train, 
-                "val_loss": avg_val,
-                "spearman": spearman
-            })
+            wandb.log({"epoch": epoch, "train_loss": avg_train,
+                       "val_loss": val_loss, "spearman": spear})
         if args.use_mlflow:
-            mlflow.log_metrics({
-                "train_loss": avg_train,
-                "val_loss": avg_val,
-                "spearman": spearman
-            }, step=epoch)
+            mlflow.log_metrics({"train_loss": avg_train,
+                                "val_loss": val_loss,
+                                "spearman": spear}, step=epoch)
 
-        # ─── Check early stopping based on Spearman correlation ──────────────────
-        if spearman > best_spearman:
-            best_spearman = spearman
-            best_epoch = epoch
-            epochs_no_improve = 0
-            # ─── Save best checkpoint ────────────────────────────────────────
-            ckpt = args.output_dir / f"{args.group}_best.pth"
-            torch.save(model.state_dict(), ckpt)
-            print(f"[INFO] New best Spearman correlation: {spearman:.4f} at epoch {epoch}")
-            if args.use_wandb:
-                wandb.save(str(ckpt))
-            if args.use_mlflow:
-                mlflow.log_artifact(str(ckpt))
+        # Early stopping & checkpoint
+        if spear > best_spear:
+            best_spear, best_ep, no_improve = spear, epoch, 0
+            model.save_pretrained(model_dir)
+            tokenizer.save_pretrained(model_dir)
+            print(f"[INFO] Saved best model at epoch {epoch}")
         else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= args.patience:
-                print(f"[INFO] Early stopping triggered at epoch {epoch}")
-                print(f"[INFO] Best Spearman correlation: {best_spearman:.4f} achieved at epoch {best_epoch}")
+            no_improve += 1
+            if no_improve >= args.patience:
+                print(f"[INFO] Early stopping at epoch {epoch}")
                 break
-            else:
-                print(f"[INFO] No improvement in Spearman correlation for {epochs_no_improve} epochs")
 
-        # ─── Periodic saves every 5 epochs ──────────────────────────────────
         if epoch % 5 == 0:
-            ckpt_dir = args.output_dir / f"{args.group}_epoch_{epoch}"
-            model.save_pretrained(ckpt_dir)
-            tokenizer.save_pretrained(ckpt_dir)
-            if args.use_wandb:
-                artifact = wandb.Artifact(f"{args.group}_model_epoch_{epoch}", type="model")
-                artifact.add_dir(str(ckpt_dir))
-                wandb.log_artifact(artifact)
-            if args.use_mlflow:
-                mlflow.pytorch.log_model(model, artifact_path=f"{args.group}_epoch_{epoch}")
+            chk = model_dir / f"epoch_{epoch}"
+            chk.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(chk)
+            tokenizer.save_pretrained(chk)
 
-    # ─── Save metrics to CSV ─────────────────────────────────────────────────
-    metrics_df = pd.DataFrame({
-        'epoch': range(1, len(train_losses) + 1),
-        'train_loss': train_losses,
-        'val_loss': val_losses,
-        'spearman': spearman_scores
-    })
-    metrics_file = args.output_dir / f"{args.group}_metrics.csv"
-    metrics_df.to_csv(metrics_file, index=False)
-    print(f"[INFO] Saved metrics to {metrics_file}")
+    # Save metrics and plots
+    df = pd.DataFrame({"epoch": range(1, len(train_losses)+1),
+                       "train_loss": train_losses,
+                       "val_loss": val_losses,
+                       "spearman": spearman_scores})
+    df.to_csv(model_dir / f"{group}_metrics.csv", index=False)
+    plot_metrics(train_losses, val_losses, spearman_scores, model_dir, group)
 
-    # ─── Finish runs ───────────────────────────────────────────────────────────
-    if args.use_wandb:
-        wandb.finish()
-    if args.use_mlflow:
-        mlflow.end_run()
+    if args.use_wandb: wandb.finish()
+    if args.use_mlflow: mlflow.end_run()
 
-    # ─── View MLflow data ──────────────────────────────────────────────────────
-    if args.view_mlflow:
-        if mlflow is None:
-            raise ImportError("mlflow not installed; `pip install mlflow` to use --view_mlflow")
-        import subprocess
-        print("[INFO] Starting MLflow UI. View the results at http://localhost:5000")
-        print("[INFO] Press Ctrl+C to stop the MLflow UI")
-        try:
-            subprocess.run(["mlflow", "ui", "--port", "5000"], check=True)
-        except KeyboardInterrupt:
-            print("[INFO] MLflow UI stopped")
-
-    return {
-        'train_losses': train_losses,
-        'val_losses': val_losses,
-        'spearman_scores': spearman_scores,
-    }
 
 def main():
     args = parse_args()
-    run_finetuning(args)
+    for grp in args.groups:
+        print(f"\n=== Training {grp.title()} Diversity Model ===")
+        run_finetuning(args, grp)
+
 
 if __name__ == "__main__":
     main()
