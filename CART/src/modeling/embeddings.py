@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
 extract_embeddings.py
-CLS stands for Class token.
-Extracts [CLS] embeddings from an ESM-2 model for all sequences in a FASTA,
-and saves them as a NumPy array of shape (n_sequences, hidden_size).
-Supports CUDA, MPS, or CPU via --device.
-Skips any sequence longer than the model's maximum allowable length.
+
+Extracts per-sequence [CLS] embeddings from an ESM-2 model (pretrained or fine-tuned),
+skipping any sequences longer than the model’s max length, and writes them out as
+a NumPy array plus a matching IDs file.
 """
 import argparse
-import os
-import sys
+import json
+from pathlib import Path
 
 import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 from Bio import SeqIO
 
-# Get the project root directory (3 levels up from this file)
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 def select_device(choice: str) -> torch.device:
     if choice == "auto":
@@ -28,138 +25,124 @@ def select_device(choice: str) -> torch.device:
         return torch.device("cpu")
     return torch.device(choice)
 
-def parse_args():
-    parser = argparse.ArgumentParser()
+
+def parse_args(args_list=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Extract CLS embeddings from ESM2 models and finetuned models")
+    # Required arguments with default paths
     parser.add_argument(
-        "--fasta",
-        type=str,
-        default="CART/mutants/CAR_mutants.fasta",
-        help="Input FASTA file with one sequence per record (relative to project root)",
+        "--mutant_fasta", 
+        type=Path, 
+        default=Path('output/mutants/CAR_mutants.fasta'),
+        help="Path to mutant FASTA file, relative to project root"
     )
     parser.add_argument(
-        "--model",
-        type=str,
-        default="facebook/esm2_t6_8M_UR50D",
-        help="HuggingFace model name or path (e.g. facebook/esm2_t6_8M_UR50D or ./fine_tuned_models/high_best)",
+        "--pretrained", 
+        type=str, 
+        default="facebook/esm2_t6_8M_UR50D", 
+        help="Pretrained model name or path"
     )
     parser.add_argument(
-        "--out_emb",     
-        type=str,
-        default="CART/embeddings/esm2_t6_8M_UR50D_embeddings.npy",
-        help="Output .npy file to save embeddings (relative to project root)",
+        "--finetuned_high", 
+        type=Path, 
+        default=Path('../../output/models/high'), 
+        help="Path to high-diversity fine-tuned model"
+    )
+    parser.add_argument(
+        "--finetuned_low", 
+        type=Path, 
+        default=Path('../../output/models/low'), 
+        help="Path to low-diversity fine-tuned model"
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=Path,
+        default=Path("output/embeddings"),
+        help="Output directory (relative to project root)",
     )
     parser.add_argument(
         "--device",
         choices=["auto", "cuda", "mps", "cpu"],
         default="auto",
-        help="Compute device to use",
+        help="Compute device",
     )
-    return parser.parse_args()
+    return parser.parse_args(args_list)
 
-def run_embeddings(fasta_path, output_path, model="facebook/esm2_t6_8M_UR50D", device="auto"):
-    """
-    Extract embeddings from sequences in a FASTA file.
-    
-    Args:
-        fasta_path (str): Path to input FASTA file (relative to project root)
-        output_path (str): Path to save output embeddings (.npy) (relative to project root)
-        model (str): Model name or path
-        device (str): Compute device ("auto", "cuda", "mps", "cpu")
-        
-    Returns:
-        np.ndarray: Embeddings array of shape (n_sequences, hidden_size)
-    """
-    # Convert relative paths to absolute paths
-    fasta_path = os.path.join(project_root, fasta_path)
-    output_path = os.path.join(project_root, output_path)
-    
-    # Print paths for debugging
-    print(f"[INFO] Input FASTA: {fasta_path}")
-    print(f"[INFO] Output embeddings: {output_path}")
-    
-    device = select_device(device)
+
+def run_embeddings(args: argparse.Namespace):
+    # 1. locate project root (four levels up from this script)
+    root = Path(__file__).parent.parent.parent.parent.resolve()
+
+    # 2. resolve FASTA path
+    fasta_path = args.mutant_fasta if args.mutant_fasta.is_absolute() else root / args.mutant_fasta
+    if not fasta_path.exists():
+        raise FileNotFoundError(f"FASTA not found at {fasta_path}")
+
+    # 3. read sequences once
+    seqs = [str(r.seq) for r in SeqIO.parse(str(fasta_path), "fasta")]
+    ids  = [r.id        for r in SeqIO.parse(str(fasta_path), "fasta")]
+    print(f"[INFO] Loaded {len(seqs)} sequences from {fasta_path}")
+
+    # 4. select device
+    device = select_device(args.device)
     print(f"[INFO] Using device: {device}")
 
-    # Load tokenizer & model (with hidden states)
-    if not model.startswith(("facebook/", "http://", "https://")):
-        # Local path
-        model_path = model
-        # Use default pretrained tokenizer
-        tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D", do_lower_case=False)
-        model_obj = AutoModelForMaskedLM.from_pretrained("facebook/esm2_t6_8M_UR50D", output_hidden_states=True)
-        model_obj.load_state_dict(torch.load(model_path, map_location=device))
-    else:
-        # Load from Hugging Face Hub
-        tokenizer = AutoTokenizer.from_pretrained(model, do_lower_case=False)
-        model_obj = AutoModelForMaskedLM.from_pretrained(model, output_hidden_states=True)
-    model_obj.to(device).eval()
+    # 5. iterate over all three models
+    models = {
+        'pretrained': args.pretrained,
+        'finetuned_high': args.finetuned_high,
+        'finetuned_low': args.finetuned_low
+    }
 
-    # Correctly determine model's max tokens and compute max sequence length
-    max_tokens = min(tokenizer.model_max_length, 512)  # Set a reasonable upper limit
-    max_seq_len = max_tokens - 2
-    print(f"[INFO] Model max tokens     = {max_tokens}")
-    print(f"[INFO] Max amino-acid length = {max_seq_len}")
+    for label, spec in models.items():
+        # resolve model directory or hub name
+        if isinstance(spec, Path) and (root / spec).exists():
+            model_dir = root / spec
+            print(f"[INFO] Loading fine-tuned model ({label}) from {model_dir}")
+        else:
+            model_dir = str(spec)
+            print(f"[INFO] Loading model ({label}) from hub: {model_dir}")
 
-    # Ensure input file exists
-    if not os.path.exists(fasta_path):
-        raise FileNotFoundError(f"Input FASTA file not found: {fasta_path}")
+        # load model + tokenizer
+        model_obj = AutoModelForMaskedLM.from_pretrained(str(model_dir))
+        tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+        model_obj = model_obj.to(device).eval()
 
-    embeddings = []
-    seq_ids = []
+        # determine max sequence length
+        max_tok    = model_obj.config.max_position_embeddings
+        max_aa_len = max_tok - 2
+        print(f"[INFO] [{label}] Model max tokens = {max_tok}, so max AA = {max_aa_len}")
 
-    for rec in SeqIO.parse(fasta_path, "fasta"):
-        seq = str(rec.seq)
-        L = len(seq)
-        if L > max_seq_len:
-            print(f"[WARNING] Skipping {rec.id!r}: length {L} > {max_seq_len}")
-            continue
-
-        enc = tokenizer(
-            seq,
-            return_tensors="pt",
-            truncation=True,
-            padding="max_length",
-            max_length=max_tokens,
-        )
-        input_ids = enc["input_ids"].to(device)
-        attention_mask = enc["attention_mask"].to(device)
-
+        # extract embeddings
+        embeddings = []
         with torch.no_grad():
-            outputs = model_obj(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-            )
-        # last hidden layer: (1, max_tokens, H)
-        last_hidden = outputs.hidden_states[-1]
-        # [CLS] token is at position 0
-        cls_emb = last_hidden[:, 0, :].squeeze(0).cpu().numpy()  # (H,)
-        embeddings.append(cls_emb)
-        seq_ids.append(rec.id)
+            for seq in seqs:
+                if len(seq) > max_aa_len:
+                    seq = seq[:max_aa_len]
+                enc = tokenizer(seq, return_tensors="pt", truncation=True, padding=False)
+                enc = {k: v.to(device) for k, v in enc.items()}
+                out = model_obj(**enc, output_hidden_states=True)
+                h = out.hidden_states[-1][0, 1 : 1 + len(seq), :].mean(dim=0).cpu().numpy()
+                embeddings.append(h)
+        emb_arr = np.stack(embeddings, axis=0)
+        print(f"[INFO] [{label}] Computed embeddings shape {emb_arr.shape}")
 
-    if not embeddings:
-        raise RuntimeError("No sequences processed; all were too long or FASTA was empty.")
+        # save embeddings + IDs
+        out_emb_path = args.out_dir / f"{label}_embeddings.npy"
+        full_out_emb = out_emb_path if out_emb_path.is_absolute() else root / out_emb_path
+        full_out_emb.parent.mkdir(parents=True, exist_ok=True)
+        np.save(str(full_out_emb), emb_arr)
+        print(f"[INFO] Saved embeddings to {full_out_emb}")
 
-    embeddings = np.vstack(embeddings)  # (n_seqs, H)
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
-    np.save(output_path, embeddings)
-    print(f"[INFO] Saved embeddings array {embeddings.shape} to {output_path}")
+        ids_path = full_out_emb.with_suffix(".ids.txt")
+        with open(ids_path, "w") as f:
+            f.write("\n".join(ids))
+        print(f"[INFO] Saved sequence IDs to {ids_path}")
 
-    # Optionally, save seq_ids for later mapping
-    id_file = os.path.splitext(output_path)[0] + ".ids.txt"
-    with open(id_file, "w") as fh:
-        for sid in seq_ids:
-            fh.write(f"{sid}\n")
-    print(f"[INFO] Saved sequence IDs to {id_file}")
-    
-    return embeddings
 
 def main():
     args = parse_args()
-    run_embeddings(args.fasta, args.out_emb, args.model, args.device)
+    run_embeddings(args)
+
 
 if __name__ == "__main__":
     main()
