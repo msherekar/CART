@@ -1,356 +1,189 @@
 #!/usr/bin/env python3
 """
-CAR-T Cell Activity Prediction Pipeline
+CART-Project pipeline orchestrator (main.py)
 
-This script serves as the main entry point for the CAR-T prediction pipeline.
-It orchestrates the entire workflow from data preparation to model evaluation.
+CLI-driven entrypoint to run one or more steps of the CAR-T pipeline.
+You can override paths via flags. Each submodule has its own `parse_args` and `run_<step>` functions.
 """
-
 import argparse
-import logging
 from pathlib import Path
-from typing import Optional, List
+import sys
 
-# Configure logging first
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Import each module's parser and runner
+from CART.src.data.augmentation import parse_args as aug_parse_args_orig, run_augmentation
+from CART.src.data.mds import parse_args as mds_parse_args_orig, run_mds
+from CART.src.data.mutants import parse_args as mut_parse_args_orig, run_mutants
+from CART.src.modeling.finetuning import parse_args as ft_parse_args_orig, run_finetuning
+from CART.src.modeling.embeddings import parse_args as emb_parse_args_orig, run_embeddings
+from CART.src.modeling.prediction import parse_args as pred_parse_args_orig, run_prediction
+from CART.src.modeling.evaluation import parse_args as eval_parse_args_orig, run_evaluation
+from CART.src.modeling.score import parse_args as score_parse_args_orig, run_score
+# Fix for the buggy parse_args functions in each module
+def safe_parse_args(parser_func, args_list):
+    """Safely call a module's parse_args function with our own args list"""
+    # Save the original sys.argv
+    orig_argv = sys.argv
+    try:
+        # Temporarily replace sys.argv with a minimal argv that won't interfere
+        sys.argv = ['dummy_program']
+        # Create a fresh parser and parse our args_list directly
+        return parser_func(args_list)
+    finally:
+        # Restore original sys.argv
+        sys.argv = orig_argv
 
-from CART.src.data.augmentation import run_augmentation
-from CART.src.data.mds import run_mds_analysis
-from CART.src.data.mutants import run_mutants
-from CART.src.modeling.finetuning import run_finetuning
-from CART.src.modeling.pll import run_pll
-from CART.src.modeling.embeddings import run_embeddings
-from CART.src.modeling.prediction import run_prediction
-from CART.src.modeling.evaluation import run_evaluation
-from CART.src.modeling.score import run_score
-from CART.src.modeling.visualization import (
-    plot_metrics_from_mlflow,
-    plot_training_metrics,
-    plot_correlation_comparison
-)
-from CART.src.utils import get_project_root, get_relative_path, DEFAULT_OUTPUT_DIR
+# Use the safe wrapper for each module's parse_args
+aug_parse_args = lambda args_list: safe_parse_args(aug_parse_args_orig, args_list)
+mds_parse_args = lambda args_list: safe_parse_args(mds_parse_args_orig, args_list)
+mut_parse_args = lambda args_list: safe_parse_args(mut_parse_args_orig, args_list)
+ft_parse_args = lambda args_list: safe_parse_args(ft_parse_args_orig, args_list)
+emb_parse_args = lambda args_list: safe_parse_args(emb_parse_args_orig, args_list)
+pred_parse_args = lambda args_list: safe_parse_args(pred_parse_args_orig, args_list)
+eval_parse_args = lambda args_list: safe_parse_args(eval_parse_args_orig, args_list)
+score_parse_args = lambda args_list: safe_parse_args(score_parse_args_orig, args_list)
 
-# Default paths
-project_root = get_project_root()
-logger.info(f"Project root: {project_root}")
 
-DEFAULT_WT_CD28 = project_root / "fasta" / "wt_cd28.fasta"
-DEFAULT_WT_CD3Z = project_root / "fasta" / "wt_cd3z.fasta"
-DEFAULT_UNIPROT_DB = project_root / "fasta" / "uniprot_trembl.fasta"
+def run_pipeline():
+    # project root is the absolute path to CART-Project
+    project_root = Path(__file__).resolve().parents[2].absolute()
+    print(f"Project root: {project_root}")
+    
+    # Make sure output directories exist
+    (project_root/'output').mkdir(exist_ok=True)
+    (project_root/'output'/'augmentation').mkdir(exist_ok=True, parents=True)
+    (project_root/'output'/'mds').mkdir(exist_ok=True, parents=True)
+    (project_root/'output'/'mutants').mkdir(exist_ok=True, parents=True)
+    (project_root/'output'/'plots').mkdir(exist_ok=True, parents=True)
+    (project_root/'output'/'models').mkdir(exist_ok=True, parents=True)
 
-logger.info(f"Default WT CD28 path: {DEFAULT_WT_CD28}")
-logger.info(f"Default WT CD3Z path: {DEFAULT_WT_CD3Z}")
-logger.info(f"Default Uniprot DB path: {DEFAULT_UNIPROT_DB}")
-
-def setup_directories(base_dir: Path) -> dict:
-    """Create necessary directories for the pipeline"""
-    dirs = {
-        'data': base_dir / 'data',
-        'models': base_dir / 'models',
-        'results': base_dir / 'results',
-        'plots': base_dir / 'plots',
-        'embeddings': base_dir / 'embeddings',
-        'mutants': base_dir / 'mutants',
-        'augmented': base_dir / 'augmented'
-    }
-    
-    for dir_path in dirs.values():
-        dir_path.mkdir(parents=True, exist_ok=True)
-    
-    return dirs
-
-def run_pipeline(
-    wt_cd28: Path,
-    wt_cd3z: Path,
-    uniprot_db: Path,
-    output_dir: Path,
-    device: str = "auto",
-    batch_size: int = 32,
-    max_length: int = 256,
-    grad_accum: int = 4,
-    patience: int = 5,
-    use_wandb: bool = False,
-    use_mlflow: bool = False,
-    num_cores: Optional[int] = None,
-    skip_steps: Optional[List[str]] = None
-):
-    """
-    Run the complete CAR-T prediction pipeline.
-    
-    Args:
-        wt_cd28: Path to WT CD28 FASTA file
-        wt_cd3z: Path to WT CD3ζ FASTA file
-        uniprot_db: Path to Uniprot database FASTA file
-        output_dir: Base directory for all outputs
-        device: Compute device to use
-        batch_size: Training batch size
-        max_length: Maximum sequence length
-        grad_accum: Gradient accumulation steps
-        patience: Early stopping patience
-        use_wandb: Whether to use Weights & Biases
-        use_mlflow: Whether to use MLflow
-        num_cores: Number of CPU cores to use
-        skip_steps: List of steps to skip
-    """
-    if skip_steps is None:
-        skip_steps = []
-    
-    # Convert all input paths to absolute paths
-    wt_cd28 = Path(wt_cd28).resolve()
-    wt_cd3z = Path(wt_cd3z).resolve()
-    uniprot_db = Path(uniprot_db).resolve()
-    output_dir = Path(output_dir).resolve()
-    
-    # Validate input files exist
-    for path in [wt_cd28, wt_cd3z, uniprot_db]:
-        if not path.exists():
-            raise FileNotFoundError(f"Input file not found: {path}")
-    
-    # Setup directories
-    dirs = setup_directories(output_dir)
-    logger.info(f"Created output directories in {output_dir}")
-    
-    # Step 1: Sequence Augmentation
-    if 'augmentation' not in skip_steps:
-        logger.info("Starting sequence augmentation...")
-        run_augmentation()  # This function uses command line arguments
-        logger.info("Sequence augmentation complete")
-    
-    # Step 2: MDS Analysis
-    if 'mds' not in skip_steps:
-        logger.info("Running MDS analysis...")
-        high_fasta = dirs['augmented'] / "high_diversity.fasta"
-        low_fasta = dirs['augmented'] / "low_diversity.fasta"
-        run_mds_analysis(
-            high_fasta_path=str(high_fasta),
-            low_fasta_path=str(low_fasta),
-            output_dir=str(dirs['plots']),
-            sample_frac=0.02  # Default fraction
-        )
-        logger.info("MDS analysis complete")
-    
-    # Step 3: Generate Mutants
-    if 'mutants' not in skip_steps:
-        logger.info("Generating mutant sequences...")
-        run_mutants(
-            wt_cd28=str(wt_cd28),
-            wt_cd3z=str(wt_cd3z),
-            output_path=str(dirs['mutants'] / "mutants.fasta")
-        )
-        logger.info("Mutant generation complete")
-    
-    # Step 4: Fine-tune Models
-    if 'finetune' not in skip_steps:
-        logger.info("Fine-tuning models...")
-        for group in ['high', 'low']:
-            run_finetuning(
-                group=group,
-                device=device,
-                high_fasta=str(dirs['augmented'] / "high_diversity.fasta"),
-                low_fasta=str(dirs['augmented'] / "low_diversity.fasta"),
-                output_dir=str(dirs['models']),
-                batch_size=batch_size,
-                max_length=max_length,
-                grad_accum=grad_accum,
-                use_wandb=use_wandb,
-                use_mlflow=use_mlflow,
-                patience=patience
-            )
-        logger.info("Model fine-tuning complete")
-    
-    # Step 5: Compute PLLs
-    if 'pll' not in skip_steps:
-        logger.info("Computing pseudo-log-likelihoods...")
-        run_pll(
-            mutant_fasta_path=str(dirs['mutants'] / "mutants.fasta"),
-            model_paths={
-                "pretrained": "facebook/esm2_t6_8M_UR50D",
-                "finetuned_high": str(dirs['models'] / "high"),
-                "finetuned_low": str(dirs['models'] / "low")
-            },
-            device=device,
-            num_cores=num_cores,
-            output_dir=str(dirs['results']),
-            plot_distribution=True
-        )
-        logger.info("PLL computation complete")
-    
-    # Step 6: Extract Embeddings
-    if 'embeddings' not in skip_steps:
-        logger.info("Extracting embeddings...")
-        for model_type in ['pretrained', 'finetuned_high', 'finetuned_low']:
-            run_embeddings(
-                fasta_path=str(dirs['mutants'] / "mutants.fasta"),
-                output_path=str(dirs['embeddings'] / f"{model_type}_embeddings.npy"),
-                model=model_type,
-                device=device
-            )
-        logger.info("Embedding extraction complete")
-    
-    # Step 7: Predict Cytotoxicity
-    if 'predict' not in skip_steps:
-        logger.info("Predicting cytotoxicity...")
-        run_prediction(
-            embedding_paths=[
-                str(dirs['embeddings'] / f"{model_type}_embeddings.npy")
-                for model_type in ['pretrained', 'finetuned_high', 'finetuned_low']
-            ],
-            output_dir=str(dirs['results']),
-            use_real_labels=False  # Set to True if you have real labels
-        )
-        logger.info("Cytotoxicity prediction complete")
-    
-    # Step 8: Evaluate Models
-    if 'evaluate' not in skip_steps:
-        logger.info("Evaluating models...")
-        run_evaluation(
-            embedding_paths=[
-                str(dirs['embeddings'] / f"{model_type}_embeddings.npy")
-                for model_type in ['pretrained', 'finetuned_high', 'finetuned_low']
-            ],
-            output_dir=str(dirs['results']),
-            use_real_labels=False  # Set to True if you have real labels
-        )
-        logger.info("Model evaluation complete")
-    
-    # Step 9: Score Predictions
-    if 'score' not in skip_steps:
-        logger.info("Scoring predictions...")
-        run_score(
-            predictions_dir=str(dirs['results']),
-            output_dir=str(dirs['results'])
-        )
-        logger.info("Prediction scoring complete")
-    
-    logger.info("Pipeline completed successfully!")
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="CAR-T Cell Activity Prediction Pipeline")
-    
-    # Get project root for default paths
-    project_root = get_project_root()
-    
-    # Required arguments with sensible defaults
+    # top-level CLI for selecting steps and base paths
+    parser = argparse.ArgumentParser(description="Run CART pipeline steps")
     parser.add_argument(
-        "--wt_cd28", 
-        type=Path, 
-        default=project_root / "fasta" / "wt_cd28.fasta",
-        help="Path to WT CD28 FASTA file"
+        '-s', '--steps', nargs='+', choices=['all','augmentation','mds','mutants','finetuning','embeddings','prediction','evaluation','score'],
+        default=['all'], help='Which steps to run'
     )
     parser.add_argument(
-        "--wt_cd3z", 
-        type=Path, 
-        default=project_root / "fasta" / "wt_cd3z.fasta",
-        help="Path to WT CD3ζ FASTA file"
+        '--fasta-dir', type=Path,
+        default=project_root/'CART'/'fasta', help='Folder of input FASTA files'
     )
     parser.add_argument(
-        "--uniprot_db", 
-        type=Path, 
-        default=project_root / "fasta" / "uniprot_trembl.fasta",
-        help="Path to Uniprot database FASTA file"
-    )
-    
-    # Optional arguments
-    parser.add_argument(
-        "--output_dir", 
-        type=Path, 
-        default=DEFAULT_OUTPUT_DIR, 
-        help="Base directory for outputs"
+        '--output-dir', type=Path,
+        default=project_root/'output', help='Root for all outputs'
     )
     parser.add_argument(
-        "--device", 
-        type=str, 
-        default="auto", 
-        help="Compute device to use"
+        '--model-dir', type=Path,
+        default=project_root/'output'/'models', help='Folder for models'
     )
-    parser.add_argument(
-        "--batch_size", 
-        type=int, 
-        default=32, 
-        help="Training batch size"
-    )
-    parser.add_argument(
-        "--max_length", 
-        type=int, 
-        default=256, 
-        help="Maximum sequence length"
-    )
-    parser.add_argument(
-        "--grad_accum", 
-        type=int, 
-        default=4, 
-        help="Gradient accumulation steps"
-    )
-    parser.add_argument(
-        "--patience", 
-        type=int, 
-        default=5, 
-        help="Early stopping patience"
-    )
-    parser.add_argument(
-        "--use_wandb", 
-        action="store_true", 
-        help="Use Weights & Biases"
-    )
-    parser.add_argument(
-        "--use_mlflow", 
-        action="store_true", 
-        help="Use MLflow"
-    )
-    parser.add_argument(
-        "--num_cores", 
-        type=int, 
-        help="Number of CPU cores to use"
-    )
-    parser.add_argument(
-        "--skip", 
-        nargs="+", 
-        choices=[
-            "augmentation", "mds", "mutants", "finetune", "pll", "embeddings", 
-            "predict", "evaluate", "score"
-        ], 
-        help="Steps to skip"
-    )
-    
     args = parser.parse_args()
     
-    # Validate that input files exist if using defaults
-    for path, name in [
-        (args.wt_cd28, "WT CD28 FASTA"),
-        (args.wt_cd3z, "WT CD3ζ FASTA"),
-        (args.uniprot_db, "Uniprot database FASTA")
-    ]:
-        if not path.exists():
-            logger.warning(
-                f"{name} file not found at {path}. "
-                "Please provide correct paths using command line arguments."
-            )
-    
-    return args
+    print(f"FASTA directory: {args.fasta_dir}")
+    print(f"Output directory: {args.output_dir}")
+    print(f"Model directory: {args.model_dir}")
 
-def main():
-    args = parse_args()
-    
-    # Run the pipeline
-    run_pipeline(
-        wt_cd28=args.wt_cd28,
-        wt_cd3z=args.wt_cd3z,
-        uniprot_db=args.uniprot_db,
-        output_dir=args.output_dir,
-        device=args.device,
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-        grad_accum=args.grad_accum,
-        patience=args.patience,
-        use_wandb=args.use_wandb,
-        use_mlflow=args.use_mlflow,
-        num_cores=args.num_cores,
-        skip_steps=args.skip
-    )
+    selected = set(args.steps)
+    if 'all' in selected:
+        selected = {'augmentation', 'mds', 'mutants', 'finetuning', 
+                   'embeddings', 'prediction', 'evaluation', 'score'}
 
-if __name__ == "__main__":
-    main() 
+    # Step 1: augmentation
+    if 'augmentation' in selected:
+        print('==> [1/8] Data augmentation')
+        aug_args = aug_parse_args([
+            '--wt_cd28', str(args.fasta_dir/'wt_cd28.fasta'),
+            '--wt_cd3z', str(args.fasta_dir/'wt_cd3z.fasta'),
+            '--uniprot_db', str(args.fasta_dir/'uniprot_trembl.fasta'),
+            '--output_dir', str(args.output_dir/'augmentation'),
+            '--plots_dir', str(args.output_dir/'augmentation'/'plots')
+        ])
+        run_augmentation(aug_args)
+
+    # Step 2: MDS
+    if 'mds' in selected:
+        print('==> [2/8] MDS analysis')
+        mds_args = mds_parse_args([
+            '--high_fasta', str(args.output_dir/'augmentation'/'high_diversity.fasta'),
+            '--low_fasta', str(args.output_dir/'augmentation'/'low_diversity.fasta'),
+            '--output_dir', str(args.output_dir/'mds')
+        ])
+        run_mds(mds_args)
+
+    # Step 3: mutants
+    if 'mutants' in selected:
+        print('==> [3/8] Mutants processing')
+        mut_args = mut_parse_args([
+            '--output_dir', str(args.output_dir/'mutants'),
+            '--plots_dir', str(args.output_dir/'plots')
+        ])
+        run_mutants(mut_args)
+
+    # Step 4: finetuning
+    if 'finetuning' in selected:
+        print('==> [4/8] Model finetuning')
+        ft_args = ft_parse_args([
+            '--high_fasta', str(args.output_dir/'augmentation'/'high_diversity.fasta'),
+            '--low_fasta', str(args.output_dir/'augmentation'/'low_diversity.fasta'),
+            '--output_dir', str(args.model_dir),
+            '--max_epochs', '51'
+        ])
+        for group in ['high', 'low']:
+            run_finetuning(ft_args, group)
+    
+    # Step 5: Extract Embeddings
+    if 'embeddings' in selected:
+        print('==> [5/8] Extract embeddings')
+        emb_args = emb_parse_args([
+            '--mutant_fasta', str(args.output_dir/'mutants'/'CAR_mutants.fasta'),
+            '--pretrained', 'facebook/esm2_t6_8M_UR50D',
+            '--finetuned_high', str(args.model_dir/'high'),
+            '--finetuned_low', str(args.model_dir/'low'),
+            '--out_dir', str(args.output_dir/'embeddings'),
+            '--device', 'auto'
+        ])
+        run_embeddings(emb_args)
+        
+    # Step 6: Prediction
+    if 'prediction' in selected:
+        print('==> [6/8] Running predictions')
+        pred_args = pred_parse_args([
+            '--embedding_dir', str(args.output_dir/'embeddings'),
+            '--labels_path', str(args.output_dir/'mutants'/'CAR_mutants_cytox.csv'),
+            '--output_dir', str(args.output_dir/'results'),
+            '--n_splits', '5',
+            '--random_seed', '42'
+        ])
+        run_prediction(pred_args)
+    
+    # Step 7: Evaluation
+    if 'evaluation' in selected:
+        print('==> [7/8] Running evaluation')
+        # Find all embedding files in the embeddings directory
+        embeddings_dir = args.output_dir/'embeddings'
+        
+        # Create embeddings_files list as absolute paths to .npy files
+        eval_args = eval_parse_args([
+            '--embed_paths', 
+            str(embeddings_dir/'pretrained_embeddings.npy'), 
+            str(embeddings_dir/'finetuned_high_embeddings.npy'),
+            str(embeddings_dir/'finetuned_low_embeddings.npy'),
+            '--output_dir', str(args.output_dir/'evaluation'),
+            '--labels_path', str(args.output_dir/'mutants'/'CAR_mutants_cytox.csv'),
+            '--use_real_labels',
+            '--random_seed', '42',
+            '--n_splits', '5'
+        ])
+        run_evaluation(eval_args)
+        
+    # Step 8: Model Scoring
+    if 'score' in selected:
+        print('==> [8/8] Running model scoring')
+        score_args = score_parse_args([
+            '--predictions_dir', str(args.output_dir/'results'),
+            '--output_file', str(args.output_dir/'model_scores.json'),
+            '--output_dir', str(args.output_dir/'plots'),
+            '--k_values', '5', '10', '20'
+        ])
+        run_score(score_args)
+
+
+if __name__ == '__main__':
+    run_pipeline()
