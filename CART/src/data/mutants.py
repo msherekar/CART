@@ -23,14 +23,15 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # --- Constants ---
-FMC63_SCFV = (
+# Default values that can be overridden
+DEFAULT_FMC63_SCFV = (
     "EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWVAYISSGGGSTYYADSVKGRFT"
     "ISRDNSKNTLYLQMNSLRAEDTAVYYCAKYPHGYWYFDVWGQGTLVTVSSGGGGSGGGGSGGGGSEIVL"
     "TQSPGTLSLSPGERATLSCRASQSVSSSYLAWYQQKPGQAPRLLIYDASTRATGIPDRFSGSGSGTDFTL"
     "TISSLQPEDFATYYCQQYNSYPLTFGAGTKLEIK"
 )
-CD28_SEQ = "EVMYPPPYLDNEKSNGTIIHVKGKHLCPSPLFPGPSKPFWVLVVVGGVLACYSLLVTVAFIIFWVRSKRSLLHSDYMNMTPRRPGPTRKHYQPYAPPRDFAAYRS"
-CD3Z_SEQ = "RVKFSRSADAPAYQQGQNQLYNELNLGRREEYDVLDKRRGRDPEMGGKPQRRKNPQEGLYNELQKDKMAEAYSEIGMKGERRRGKGHDGLYQGLSTATKDTYDALHMQALPPR"
+DEFAULT_CD28_SEQ = "EVMYPPPYLDNEKSNGTIIHVKGKHLCPSPLFPGPSKPFWVLVVVGGVLACYSLLVTVAFIIFWVRSKRSLLHSDYMNMTPRRPGPTRKHYQPYAPPRDFAAYRS"
+DEFAULT_CD3Z_SEQ = "RVKFSRSADAPAYQQGQNQLYNELNLGRREEYDVLDKRRGRDPEMGGKPQRRKNPQEGLYNELQKDKMAEAYSEIGMKGERRRGKGHDGLYQGLSTATKDTYDALHMQALPPR"
 AA_LIST = "ACDEFGHIKLMNPQRSTVWY"
 AA_TO_IDX = {aa: i for i, aa in enumerate(AA_LIST)}
 DEFAULT_N_MUTANTS = 382
@@ -180,9 +181,12 @@ def dummy_cytox_data(
 
 def plot_mutants(
     mutants: List[Tuple[str, str]],
-    out_path: Path
+    out_path: Path,
+    fmc63_scfv: str = DEFAULT_FMC63_SCFV,
+    cd28_seq: str = DEFAULT_CD28_SEQ,
+    cd3z_seq: str = DEFAULT_CD3Z_SEQ
 ) -> None:
-    counts = [sum(1 for a,b in zip(seq, FMC63_SCFV+CD28_SEQ+CD3Z_SEQ) if a!=b) for _,seq in mutants]
+    counts = [sum(1 for a,b in zip(seq, fmc63_scfv+cd28_seq+cd3z_seq) if a!=b) for _,seq in mutants]
     plt.figure(figsize=(8,6))
     plt.hist(counts, bins=range(min(counts), max(counts)+2), edgecolor='k', alpha=0.7)
     plt.title('Mutation Counts')
@@ -212,7 +216,14 @@ def plot_cytotoxicity(
     log.info(f"Saved cytotoxicity plot to {out_path}")
 
 
-def run_mutants(args: argparse.Namespace) -> None:
+def run_mutants(args: argparse.Namespace, fmc63_scfv=None, cd28_seq=None, cd3z_seq=None) -> None:
+    """Process mutants and prepare data for modeling."""
+    # Use provided sequences or defaults
+    fmc63_scfv = fmc63_scfv or DEFAULT_FMC63_SCFV
+    cd28_seq = cd28_seq or DEFAULT_CD28_SEQ
+    cd3z_seq = cd3z_seq or DEFAULT_CD3Z_SEQ
+    
+    # Continue with the rest of the function using these sequences
     # Resolve paths
     root = Path(__file__).parent.parent.resolve()
     out_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
@@ -222,7 +233,7 @@ def run_mutants(args: argparse.Namespace) -> None:
 
     log.info(f"Generating {args.n_mutants} CAR mutants (max {args.max_mutations} mutations)")
     mutants = generate_car_mutants(
-        args.n_mutants, CD28_SEQ, CD3Z_SEQ, FMC63_SCFV,
+        args.n_mutants, cd28_seq, cd3z_seq, fmc63_scfv,
         args.max_mutations, args.random_seed
     )
     csv_p, tsv_p, fasta_p = save_mutants(mutants, base)
@@ -235,7 +246,7 @@ def run_mutants(args: argparse.Namespace) -> None:
     )
 
     if not args.no_plots:
-        plot_mutants(mutants, plot_dir/"mutation_counts.png")
+        plot_mutants(mutants, plot_dir/"mutation_counts.png", fmc63_scfv, cd28_seq, cd3z_seq)
         plot_cytotoxicity(cytox, plot_dir/"cytotoxicity.png")
 
 
