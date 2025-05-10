@@ -15,6 +15,7 @@ import os
 import json
 import argparse
 import matplotlib.pyplot as plt
+import pandas as pd
 
 
 
@@ -190,36 +191,81 @@ def load_progress(model_name, total_sequences, output_dir):
     return [], 0
 
 def plot_pll_results(results_dict, output_path):
-    """Plot bar graph comparing PLL scores across models"""
+    """Plot bar graph comparing PLL scores across models and plot perplexity."""
     plt.figure(figsize=(10, 6))
     
     # Prepare data for plotting
     models = list(results_dict.keys())
     avg_plls = [np.nanmean(results_dict[model]) for model in models]
     
-    # Create bar plot
-    bars = plt.bar(models, avg_plls, color=['skyblue', 'lightgreen', 'salmon'])
+    # Compute perplexity for each model
+    perplexities = [np.exp(-pll) for pll in avg_plls]
     
-    # Add value labels on top of each bar
+    # Save PLL data as CSV for custom plotting
+    results_dir = Path(os.path.dirname(output_path))
+    csv_path = results_dir / "pll_scores.csv"
+    
+    # Create DataFrame for all sequence scores
+    seq_data = {}
+    for model in models:
+        seq_data[model] = results_dict[model]
+    
+    # Ensure all columns have the same length by padding with NaN
+    max_len = max(len(scores) for scores in seq_data.values())
+    for model, scores in seq_data.items():
+        if len(scores) < max_len:
+            seq_data[model] = scores + [np.nan] * (max_len - len(scores))
+    
+    # Save sequence-level scores
+    seq_df = pd.DataFrame(seq_data)
+    seq_df.to_csv(csv_path, index=False)
+    print(f"[INFO] Sequence-level PLL scores saved to {csv_path}")
+    
+    # Save summary statistics including perplexity
+    summary_df = pd.DataFrame({
+        'model': models,
+        'avg_pll': avg_plls,
+        'perplexity': perplexities,
+        'min_pll': [np.nanmin(results_dict[model]) for model in models],
+        'max_pll': [np.nanmax(results_dict[model]) for model in models],
+        'std_pll': [np.nanstd(results_dict[model]) for model in models],
+    })
+    summary_path = results_dir / "pll_summary.csv"
+    summary_df.to_csv(summary_path, index=False)
+    print(f"[INFO] PLL summary statistics (with perplexity) saved to {summary_path}")
+    
+    # Create bar plot for PLL
+    bars = plt.bar(models, avg_plls, color=['skyblue', 'lightgreen', 'salmon'])
     for bar in bars:
         height = bar.get_height()
         plt.text(bar.get_x() + bar.get_width()/2., height,
                 f'{height:.4f}',
                 ha='center', va='bottom')
-    
     plt.title('Average Pseudo-Log-Likelihood Scores by Model')
     plt.ylabel('Average PLL Score')
     plt.xlabel('Model')
     plt.grid(axis='y', linestyle='--', alpha=0.7)
-    
-    # Ensure the output directory exists
-    output_dir = os.path.dirname(output_path)
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Save the plot
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.tight_layout()
+    plt.savefig(results_dir / 'pll_comparison.png', dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"[INFO] Plot saved to {output_path}")
+    print(f"[INFO] PLL plot saved to {results_dir / 'pll_comparison.png'}")
+    
+    # Create bar plot for Perplexity
+    plt.figure(figsize=(10, 6))
+    bars = plt.bar(models, perplexities, color=['skyblue', 'lightgreen', 'salmon'])
+    for bar in bars:
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height,
+                f'{height:.2f}',
+                ha='center', va='bottom')
+    plt.title('Perplexity by Model (lower is better)')
+    plt.ylabel('Perplexity')
+    plt.xlabel('Model')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(results_dir / 'perplexity_comparison.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"[INFO] Perplexity plot saved to {results_dir / 'perplexity_comparison.png'}")
 
 def load_model_and_tokenizer(model_name, device):
     """Load model and tokenizer based on model name"""
@@ -301,8 +347,10 @@ def run_pll(args):
     
     # Load sequences
     sequences = []
+    sequence_ids = []
     for record in SeqIO.parse(mutant_fasta, "fasta"):
         sequences.append(str(record.seq))
+        sequence_ids.append(record.id)
     print(f"Loaded {len(sequences)} sequences from {mutant_fasta}")
     
     # Process with each model
@@ -336,17 +384,26 @@ def run_pll(args):
             
             # Compute PLLs using the existing compute_pll function
             plls = []
-            for seq in sequences:
+            for seq in tqdm(sequences, desc=f"Computing PLL for {model_name}"):
                 pll = compute_pll(seq, model, tokenizer, device, args.max_tokens)
                 plls.append(pll)
             
             pll_results[model_name] = plls
             
-            # Save results
+            # Save results as numpy array
             output_path = os.path.join(args.output_dir, f"{model_name}_pll.npy")
             os.makedirs(args.output_dir, exist_ok=True)
             np.save(output_path, plls)
             print(f"Saved PLL results to {output_path}")
+            
+            # Save results as CSV with sequence IDs
+            csv_path = os.path.join(args.output_dir, f"{model_name}_pll.csv")
+            pll_df = pd.DataFrame({
+                'sequence_id': sequence_ids,
+                'pll_score': plls
+            })
+            pll_df.to_csv(csv_path, index=False)
+            print(f"Saved PLL results as CSV to {csv_path}")
             
         except Exception as e:
             print(f"Warning: Could not load model with CPU map_location: {str(e)}")

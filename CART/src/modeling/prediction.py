@@ -20,13 +20,11 @@ from scipy.stats import spearmanr
 import glob
 
 
-def parse_args():
+def parse_args(args_list=None) -> argparse.Namespace:
     
-    
-
     parser = argparse.ArgumentParser(
-        description="Run prediction model on embeddings and evaluate performance"
-    )
+            description="Run prediction model on embeddings and evaluate performance"
+        )
     parser.add_argument(
         "--embedding_dir",
         type=Path,
@@ -70,7 +68,7 @@ def parse_args():
         default=3,
         help="Number of splits for inner cross-validation"
     )
-    return parser.parse_args()
+    return parser.parse_args(args_list)
 
 
 def load_labels_and_match_ids(labels_path: Path, emb_path: Path):
@@ -128,6 +126,14 @@ def get_embedding_files(emb_dir: Path, specific: list[str] | None):
 def plot_correlation(y_test, y_pred, fold, model_name, out_dir: Path):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12))
 
+    # Save correlation data as CSV for custom plotting
+    corr_data = pd.DataFrame({
+        'actual': y_test,
+        'predicted': y_pred
+    })
+    csv_path = out_dir / f"{model_name}_fold{fold}_correlation.csv"
+    corr_data.to_csv(csv_path, index=False)
+    
     # scatter + fit
     ax1.scatter(y_pred, y_test, alpha=0.5)
     z = np.polyfit(y_pred, y_test, 1)
@@ -155,6 +161,14 @@ def plot_correlation(y_test, y_pred, fold, model_name, out_dir: Path):
 
 
 def plot_spearman_whisker(scores, model_name, out_dir: Path):
+    # Save spearman scores as CSV for custom plotting
+    scores_df = pd.DataFrame({
+        'fold': range(1, len(scores) + 1),
+        'spearman_rho': scores
+    })
+    csv_path = out_dir / f"{model_name}_spearman_scores.csv"
+    scores_df.to_csv(csv_path, index=False)
+    
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.boxplot(scores, labels=[model_name])
     ax.scatter(np.ones_like(scores), scores, color='red', alpha=0.6)

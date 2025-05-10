@@ -28,6 +28,8 @@ import numpy as np
 from scipy.stats import spearmanr
 import matplotlib.pyplot as plt
 import pandas as pd
+import sys
+from CART.src.modeling.embeddings import get_model_size_mb, check_memory_requirements
 
 
 def parse_args(args_list=None):
@@ -158,6 +160,10 @@ def run_finetuning(args, group: str):
     device = select_device(args.device)
     print(f"[INFO] Using device: {device}")
 
+    # Check if we have enough memory for the model
+    if check_memory_requirements(args.model_name, device):
+        print(f"[INFO] Memory check passed for model: {args.model_name}")
+    
     is_high = (group == "high")
     model_dir = args.output_dir / group
     if model_dir.exists():
@@ -188,95 +194,126 @@ def run_finetuning(args, group: str):
         })
 
     # Data + model
-    print(f"[INFO] Loading {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model = AutoModelForMaskedLM.from_pretrained(args.model_name).to(device)
-    fasta = args.high_fasta if is_high else args.low_fasta
-    print(f"[INFO] Loading sequences from: {fasta}")
-    full_ds = SequenceDataset(fasta, tokenizer, max_length=args.max_length)
-    train_size = int(0.8 * len(full_ds))
-    val_size = len(full_ds) - train_size
-    train_ds, val_ds = random_split(full_ds, [train_size, val_size],
-                                     generator=torch.Generator().manual_seed(42))
-    print(f"[INFO] Dataset sizes — train: {len(train_ds)}, val: {len(val_ds)}")
+    try:
+        print(f"[INFO] Loading {args.model_name}")
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+        model = AutoModelForMaskedLM.from_pretrained(args.model_name).to(device)
+        
+        # Adjust batch size based on model size to avoid OOM errors
+        model_size_mb = get_model_size_mb(args.model_name)
+        actual_batch_size = args.batch_size
+        
+        if model_size_mb > 150 and device.type == 'cuda':
+            # For larger models, reduce batch size
+            size_factor = min(150 / model_size_mb, 1.0)
+            adjusted_batch_size = max(1, int(args.batch_size * size_factor))
+            
+            if adjusted_batch_size < args.batch_size:
+                print(f"[WARNING] Reducing batch size from {args.batch_size} to {adjusted_batch_size} for large model")
+                actual_batch_size = adjusted_batch_size
+        
+        fasta = args.high_fasta if is_high else args.low_fasta
+        print(f"[INFO] Loading sequences from: {fasta}")
+        full_ds = SequenceDataset(fasta, tokenizer, max_length=args.max_length)
+        train_size = int(0.8 * len(full_ds))
+        val_size = len(full_ds) - train_size
+        train_ds, val_ds = random_split(full_ds, [train_size, val_size],
+                                        generator=torch.Generator().manual_seed(42))
+        
+        # Use the adjusted batch size
+        train_loader = DataLoader(
+            train_ds, 
+            batch_size=actual_batch_size, 
+            shuffle=True, 
+            pin_memory=not args.no_pin_memory
+        )
+        val_loader = DataLoader(
+            val_ds, 
+            batch_size=actual_batch_size, 
+            shuffle=False, 
+            pin_memory=not args.no_pin_memory
+        )
+        
+        optimizer = AdamW(model.parameters(), lr=args.learning_rate)
+        total_steps = len(train_loader) * args.max_epochs
+        scheduler = get_linear_schedule_with_warmup(optimizer, 0, total_steps)
 
-    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm_probability=0.15)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              collate_fn=data_collator, num_workers=2,
-                              pin_memory=not args.no_pin_memory)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                            collate_fn=data_collator, num_workers=2,
-                            pin_memory=not args.no_pin_memory)
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    optimizer = AdamW(model.parameters(), lr=args.learning_rate)
-    total_steps = len(train_loader) * args.max_epochs
-    scheduler = get_linear_schedule_with_warmup(optimizer, 0, total_steps)
+        train_losses, val_losses, spearman_scores = [], [], []
+        best_spear, no_improve, best_ep = float('-inf'), 0, 0
 
-    checkpoints_dir.mkdir(parents=True, exist_ok=True)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+        for epoch in range(1, args.max_epochs + 1):
+            model.train()
+            running_loss = 0.0
+            for i, batch in enumerate(train_loader):
+                batch = {k: v.to(device) for k, v in batch.items()}
+                loss = model(**batch).loss / args.grad_accum
+                loss.backward()
+                if (i + 1) % args.grad_accum == 0 or i == len(train_loader) - 1:
+                    optimizer.step(); scheduler.step(); optimizer.zero_grad()
+                running_loss += loss.item() * args.grad_accum
+            avg_train = running_loss / len(train_loader)
+            train_losses.append(avg_train)
 
-    train_losses, val_losses, spearman_scores = [], [], []
-    best_spear, no_improve, best_ep = float('-inf'), 0, 0
+            model.eval()
+            val_loss = sum(model(**{k: v.to(device) for k, v in b.items()}).loss.item()
+                           for b in val_loader) / len(val_loader)
+            val_losses.append(val_loss)
 
-    for epoch in range(1, args.max_epochs + 1):
-        model.train()
-        running_loss = 0.0
-        for i, batch in enumerate(train_loader):
-            batch = {k: v.to(device) for k, v in batch.items()}
-            loss = model(**batch).loss / args.grad_accum
-            loss.backward()
-            if (i + 1) % args.grad_accum == 0 or i == len(train_loader) - 1:
-                optimizer.step(); scheduler.step(); optimizer.zero_grad()
-            running_loss += loss.item() * args.grad_accum
-        avg_train = running_loss / len(train_loader)
-        train_losses.append(avg_train)
+            spear = compute_metrics(model, val_loader, device)
+            spearman_scores.append(spear)
+            print(f"Epoch {epoch} — train: {avg_train:.4f}, val: {val_loss:.4f}, spearman: {spear:.4f}")
 
-        model.eval()
-        val_loss = sum(model(**{k: v.to(device) for k, v in b.items()}).loss.item()
-                       for b in val_loader) / len(val_loader)
-        val_losses.append(val_loss)
+            # Logging
+            if args.use_wandb:
+                wandb.log({"epoch": epoch, "train_loss": avg_train,
+                           "val_loss": val_loss, "spearman": spear})
+            if args.use_mlflow:
+                mlflow.log_metrics({"train_loss": avg_train,
+                                    "val_loss": val_loss,
+                                    "spearman": spear}, step=epoch)
 
-        spear = compute_metrics(model, val_loader, device)
-        spearman_scores.append(spear)
-        print(f"Epoch {epoch} — train: {avg_train:.4f}, val: {val_loss:.4f}, spearman: {spear:.4f}")
+            # Early stopping & checkpoint
+            if spear > best_spear:
+                best_spear, best_ep, no_improve = spear, epoch, 0
+                model.save_pretrained(model_dir)
+                tokenizer.save_pretrained(model_dir)
+                print(f"[INFO] Saved best model at epoch {epoch}")
+            else:
+                no_improve += 1
+                if no_improve >= args.patience:
+                    print(f"[INFO] Early stopping at epoch {epoch}")
+                    break
 
-        # Logging
-        if args.use_wandb:
-            wandb.log({"epoch": epoch, "train_loss": avg_train,
-                       "val_loss": val_loss, "spearman": spear})
-        if args.use_mlflow:
-            mlflow.log_metrics({"train_loss": avg_train,
-                                "val_loss": val_loss,
-                                "spearman": spear}, step=epoch)
+            if epoch % 5 == 0:
+                chk = model_dir / f"epoch_{epoch}"
+                chk.mkdir(parents=True, exist_ok=True)
+                model.save_pretrained(chk)
+                tokenizer.save_pretrained(chk)
 
-        # Early stopping & checkpoint
-        if spear > best_spear:
-            best_spear, best_ep, no_improve = spear, epoch, 0
-            model.save_pretrained(model_dir)
-            tokenizer.save_pretrained(model_dir)
-            print(f"[INFO] Saved best model at epoch {epoch}")
+        # Save metrics and plots
+        df = pd.DataFrame({"epoch": range(1, len(train_losses)+1),
+                           "train_loss": train_losses,
+                           "val_loss": val_losses,
+                           "spearman": spearman_scores})
+        df.to_csv(model_dir / f"{group}_metrics.csv", index=False)
+        plot_metrics(train_losses, val_losses, spearman_scores, model_dir, group)
+
+        if args.use_wandb: wandb.finish()
+        if args.use_mlflow: mlflow.end_run()
+    except RuntimeError as e:
+        if 'out of memory' in str(e).lower():
+            print(f"[ERROR] GPU out of memory when loading model {args.model_name}")
+            print(f"[ERROR] Try using a smaller model, reducing batch size, or moving to CPU with --device cpu")
+            return
         else:
-            no_improve += 1
-            if no_improve >= args.patience:
-                print(f"[INFO] Early stopping at epoch {epoch}")
-                break
-
-        if epoch % 5 == 0:
-            chk = model_dir / f"epoch_{epoch}"
-            chk.mkdir(parents=True, exist_ok=True)
-            model.save_pretrained(chk)
-            tokenizer.save_pretrained(chk)
-
-    # Save metrics and plots
-    df = pd.DataFrame({"epoch": range(1, len(train_losses)+1),
-                       "train_loss": train_losses,
-                       "val_loss": val_losses,
-                       "spearman": spearman_scores})
-    df.to_csv(model_dir / f"{group}_metrics.csv", index=False)
-    plot_metrics(train_losses, val_losses, spearman_scores, model_dir, group)
-
-    if args.use_wandb: wandb.finish()
-    if args.use_mlflow: mlflow.end_run()
+            print(f"[ERROR] Failed to initialize model or data: {e}")
+            return
+    except Exception as e:
+        print(f"[ERROR] Unexpected error during model/data initialization: {e}")
+        return
 
 
 def main():

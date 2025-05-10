@@ -3,7 +3,7 @@
 extract_embeddings.py
 
 Extracts per-sequence [CLS] embeddings from an ESM-2 model (pretrained or fine-tuned),
-skipping any sequences longer than the model’s max length, and writes them out as
+skipping any sequences longer than the model's max length, and writes them out as
 a NumPy array plus a matching IDs file.
 """
 import argparse
@@ -68,6 +68,46 @@ def parse_args(args_list=None) -> argparse.Namespace:
     return parser.parse_args(args_list)
 
 
+def get_model_size_mb(model_name):
+    """Estimate the model size in MB based on the model name."""
+    if '8M' in model_name:
+        return 8
+    elif '35M' in model_name:
+        return 35
+    elif '150M' in model_name:
+        return 150
+    elif '650M' in model_name:
+        return 650
+    elif '3B' in model_name:
+        return 3000
+    else:
+        # Default case for unknown models
+        return 100
+
+
+def check_memory_requirements(model_name, device):
+    """Check if the device has enough memory for the model."""
+    model_size_mb = get_model_size_mb(model_name)
+    
+    if device.type == 'cuda':
+        try:
+            import subprocess
+            result = subprocess.run(['nvidia-smi', '--query-gpu=memory.free', '--format=csv,noheader,nounits'], 
+                                   capture_output=True, text=True)
+            free_memory_mb = int(result.stdout.strip())
+            
+            # Check if we have at least 2x the model size available
+            required_mb = model_size_mb * 2
+            if free_memory_mb < required_mb:
+                print(f"[WARNING] Your GPU has {free_memory_mb}MB free memory, but the model {model_name} requires approximately {required_mb}MB.")
+                print("[WARNING] The pipeline may run out of memory. Consider using a smaller model.")
+        except Exception as e:
+            print(f"[INFO] Could not check GPU memory: {e}")
+            print(f"[INFO] Model {model_name} requires approximately {model_size_mb * 2}MB of GPU memory.")
+    
+    return True
+
+
 def run_embeddings(args: argparse.Namespace):
     # 1. locate project root (four levels up from this script)
     root = Path(__file__).parent.parent.parent.parent.resolve()
@@ -101,42 +141,63 @@ def run_embeddings(args: argparse.Namespace):
         else:
             model_dir = str(spec)
             print(f"[INFO] Loading model ({label}) from hub: {model_dir}")
+            
+            # Check memory requirements for pretrained models
+            if label == 'pretrained':
+                check_memory_requirements(model_dir, device)
 
-        # load model + tokenizer
-        model_obj = AutoModelForMaskedLM.from_pretrained(str(model_dir))
-        tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
-        model_obj = model_obj.to(device).eval()
+        try:
+            # load model + tokenizer
+            model_obj = AutoModelForMaskedLM.from_pretrained(str(model_dir))
+            tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+            model_obj = model_obj.to(device).eval()
 
-        # determine max sequence length
-        max_tok    = model_obj.config.max_position_embeddings
-        max_aa_len = max_tok - 2
-        print(f"[INFO] [{label}] Model max tokens = {max_tok}, so max AA = {max_aa_len}")
+            # determine max sequence length
+            max_tok    = model_obj.config.max_position_embeddings
+            max_aa_len = max_tok - 2
+            print(f"[INFO] [{label}] Model max tokens = {max_tok}, so max AA = {max_aa_len}")
 
-        # extract embeddings
-        embeddings = []
-        with torch.no_grad():
-            for seq in seqs:
-                if len(seq) > max_aa_len:
-                    seq = seq[:max_aa_len]
-                enc = tokenizer(seq, return_tensors="pt", truncation=True, padding=False)
-                enc = {k: v.to(device) for k, v in enc.items()}
-                out = model_obj(**enc, output_hidden_states=True)
-                h = out.hidden_states[-1][0, 1 : 1 + len(seq), :].mean(dim=0).cpu().numpy()
-                embeddings.append(h)
-        emb_arr = np.stack(embeddings, axis=0)
-        print(f"[INFO] [{label}] Computed embeddings shape {emb_arr.shape}")
+            # extract embeddings
+            embeddings = []
+            with torch.no_grad():
+                for seq in seqs:
+                    if len(seq) > max_aa_len:
+                        print(f"[WARNING] Sequence of length {len(seq)} truncated to {max_aa_len}")
+                        seq = seq[:max_aa_len]
+                    enc = tokenizer(seq, return_tensors="pt", truncation=True, padding=False)
+                    enc = {k: v.to(device) for k, v in enc.items()}
+                    
+                    try:
+                        out = model_obj(**enc, output_hidden_states=True)
+                        h = out.hidden_states[-1][0, 1 : 1 + len(seq), :].mean(dim=0).cpu().numpy()
+                        embeddings.append(h)
+                    except RuntimeError as e:
+                        if 'out of memory' in str(e).lower():
+                            print(f"[ERROR] GPU out of memory when processing sequence of length {len(seq)}")
+                            print(f"[ERROR] Try using a smaller model or moving to CPU with --device cpu")
+                            raise
+                        else:
+                            raise
+                        
+            emb_arr = np.stack(embeddings, axis=0)
+            print(f"[INFO] [{label}] Computed embeddings shape {emb_arr.shape}")
 
-        # save embeddings + IDs
-        out_emb_path = args.out_dir / f"{label}_embeddings.npy"
-        full_out_emb = out_emb_path if out_emb_path.is_absolute() else root / out_emb_path
-        full_out_emb.parent.mkdir(parents=True, exist_ok=True)
-        np.save(str(full_out_emb), emb_arr)
-        print(f"[INFO] Saved embeddings to {full_out_emb}")
+            # save embeddings + IDs
+            out_emb_path = args.out_dir / f"{label}_embeddings.npy"
+            full_out_emb = out_emb_path if out_emb_path.is_absolute() else root / out_emb_path
+            full_out_emb.parent.mkdir(parents=True, exist_ok=True)
+            np.save(str(full_out_emb), emb_arr)
+            print(f"[INFO] Saved embeddings to {full_out_emb}")
 
-        ids_path = full_out_emb.with_suffix(".ids.txt")
-        with open(ids_path, "w") as f:
-            f.write("\n".join(ids))
-        print(f"[INFO] Saved sequence IDs to {ids_path}")
+            ids_path = full_out_emb.with_suffix(".ids.txt")
+            with open(ids_path, "w") as f:
+                f.write("\n".join(ids))
+            print(f"[INFO] Saved sequence IDs to {ids_path}")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to process model {label}: {e}")
+            print("[INFO] Continuing with the next model...")
+            continue
 
 
 def main():

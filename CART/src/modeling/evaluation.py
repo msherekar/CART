@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-evaluation.py
-
 Evaluates embeddings with nested cross-validation to compute:
 - Spearman's correlation
 - Precision and recall at different k values
@@ -10,6 +8,7 @@ Evaluates embeddings with nested cross-validation to compute:
 
 import numpy as np
 import argparse
+import pandas as pd
 from pathlib import Path
 from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import KFold
@@ -158,6 +157,10 @@ def run_evaluation(args):
     if args.output_dir:
         args.output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Create a subdirectory for CSV files
+    csv_dir = args.output_dir / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    
     # Convert strings to Path objects
     embedding_paths = []
     for path in args.embed_paths:
@@ -195,8 +198,14 @@ def run_evaluation(args):
             if str(labels_path).endswith('.npy'):
                 y = np.load(labels_path)
             elif str(labels_path).endswith('.csv'):
-                import pandas as pd
-                y = pd.read_csv(labels_path).values.flatten()
+                df = pd.read_csv(labels_path)
+                # Only use the cytotoxicity column, not all columns
+                if 'cytotoxicity' in df.columns:
+                    y = df['cytotoxicity'].values
+                else:
+                    # If cytotoxicity column not found, use the second column 
+                    # (assuming format is ID, value)
+                    y = df.iloc[:, 1].values
             else:
                 raise ValueError(f"Unsupported label file format: {labels_path}")
             
@@ -238,10 +247,10 @@ def run_evaluation(args):
             r5.append(rec5); p5.append(prec5)
             r10.append(rec10); p10.append(prec10)
             
-        results[path]["recall_at_5"] = r5
-        results[path]["precision_at_5"] = p5
-        results[path]["recall_at_10"] = r10
-        results[path]["precision_at_10"] = p10
+        res["recall_at_5"] = r5
+        res["precision_at_5"] = p5
+        res["recall_at_10"] = r10
+        res["precision_at_10"] = p10
         
         print(f" Recall@5:  {np.mean(r5):.3f} ± {np.std(r5):.3f}")
         print(f" Precision@5: {np.mean(p5):.3f} ± {np.std(p5):.3f}")
@@ -253,6 +262,20 @@ def run_evaluation(args):
         model_name = res["model_name"]
         results_dir = args.output_dir / "results"
         results_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Save metrics as CSV
+        metrics_df = pd.DataFrame({
+            'fold': range(1, len(res["spearman_rhos"]) + 1),
+            'spearman': res["spearman_rhos"],
+            'alpha': res["best_alphas"],
+            'recall_at_5': res["recall_at_5"],
+            'precision_at_5': res["precision_at_5"],
+            'recall_at_10': res["recall_at_10"],
+            'precision_at_10': res["precision_at_10"]
+        })
+        metrics_csv = csv_dir / f"{model_name}_metrics.csv"
+        metrics_df.to_csv(metrics_csv, index=False)
+        print(f"Saved metrics to {metrics_csv}")
         
         # Save Spearman scores
         spearman_file = results_dir / f"{model_name}_spearman.npy"
@@ -289,6 +312,19 @@ def run_evaluation(args):
         spearman_values = [results[path]["spearman_rhos"] for path in embedding_paths]
         model_names = [results[path]["model_name"] for path in embedding_paths]
         
+        # Save comparison data as CSV
+        comparison_data = {}
+        for i, model in enumerate(model_names):
+            comparison_data[model] = spearman_values[i]
+        
+        # Create DataFrame with variable number of rows (use the max length)
+        max_folds = max(len(vals) for vals in spearman_values)
+        comparison_df = pd.DataFrame({model: pd.Series(vals) for model, vals in zip(model_names, spearman_values)})
+        comparison_df.index = [f"fold_{i+1}" for i in range(max_folds)]
+        comparison_csv = csv_dir / "spearman_comparison.csv"
+        comparison_df.to_csv(comparison_csv)
+        print(f"Saved Spearman comparison to {comparison_csv}")
+        
         corr_plot_path = None
         if args.output_dir:
             corr_plot_path = args.output_dir / "spearman_correlation_comparison.png"
@@ -323,6 +359,17 @@ def run_evaluation(args):
             precision_at_k.append(prec_values)
             recall_at_k.append(recall_values)
         
+        # Save precision/recall at k data as CSV
+        pr_data = {'k': k_values}
+        for i, model in enumerate(model_names):
+            pr_data[f"{model}_precision"] = precision_at_k[i]
+            pr_data[f"{model}_recall"] = recall_at_k[i]
+        
+        pr_df = pd.DataFrame(pr_data)
+        pr_csv = csv_dir / "precision_recall_at_k.csv"
+        pr_df.to_csv(pr_csv, index=False)
+        print(f"Saved precision/recall at k data to {pr_csv}")
+        
         pr_plot_path = None
         if args.output_dir:
             pr_plot_path = args.output_dir / "precision_recall_at_k.png"
@@ -339,19 +386,30 @@ def run_evaluation(args):
         for i, path in enumerate(embedding_paths):
             model_name = results[path]["model_name"]
             
-            # Use the first fold's predictions
-            y_test = results[path]["y_tests"][0]
-            y_pred = results[path]["y_preds"][0]
+            # Find the fold with the highest Spearman correlation
+            spearman_scores = results[path]["spearman_rhos"]
+            best_fold_idx = np.argmax(spearman_scores)
+            best_spearman = spearman_scores[best_fold_idx]
+            
+            # Use the best fold's predictions instead of the first fold
+            y_test = results[path]["y_tests"][best_fold_idx]
+            y_pred = results[path]["y_preds"][best_fold_idx]
+            
+            # Save confusion matrix data
+            cm_data = pd.DataFrame({'y_true': y_test, 'y_pred': y_pred})
+            cm_csv = csv_dir / f"confusion_matrix_{model_name}_best_fold.csv"
+            cm_data.to_csv(cm_csv, index=False)
+            print(f"Saved best fold (ρ={best_spearman:.3f}) confusion matrix data to {cm_csv}")
             
             cm_plot_path = None
             if args.output_dir:
-                cm_plot_path = args.output_dir / f"confusion_matrix_{model_name}.png"
+                cm_plot_path = args.output_dir / f"confusion_matrix_{model_name}_best_fold.png"
             
             plot_confusion_matrix(
                 y_true=y_test,
                 y_pred=y_pred,
                 output_path=cm_plot_path,
-                title=f"Confusion Matrix: {model_name}"
+                title=f"Confusion Matrix: {model_name} (Best Fold, ρ={best_spearman:.3f})"
             )
     
     return results

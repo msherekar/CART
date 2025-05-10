@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 score.py
-
+Scores for Ridge Models
 Computes evaluation metrics for CAR-T cell activity predictions:
 - Spearman's correlation
 - Recall@K
 - Precision@K
 
-Can score a single .npz predictions file or all “*_predictions.npz” in a directory,
+Can score a single .npz predictions file or all "*_predictions.npz" in a directory,
 and outputs JSON summaries plus per-model recall/precision plots.
 """
 
@@ -16,6 +16,7 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pandas as pd
 
 from pathlib import Path
 from scipy.stats import spearmanr
@@ -28,7 +29,7 @@ PRED_KEYS   = ('predictions', 'y_pred', 'y_preds')
 DEFAULT_K   = [5, 10, 20]
 
 
-def parse_args():
+def parse_args(args_list=None):
     
     parser = argparse.ArgumentParser(description="Score CAR-T cytotoxicity predictions")
     parser.add_argument(
@@ -66,7 +67,12 @@ def parse_args():
         default=Path('output/plots'),
         help="Where to save recall/precision plots"
     )
-    return parser.parse_args()
+    # Only parse command line arguments if this module is run directly
+    if args_list is None and __name__ == "__main__":
+        return parser.parse_args()
+    else:
+        # When imported, use the provided args_list or an empty list
+        return parser.parse_args(args_list or [])
 
     
 
@@ -126,6 +132,7 @@ def score_predictions(y_true: np.ndarray,
         recall_at_k[k] = float(r)
         precision_at_k[k] = float(p)
 
+    
     return {
         "spearman_rho": float(rho),
         "spearman_pval": float(pval),
@@ -141,6 +148,16 @@ def plot_recall_precision(scores: dict, model_name: str, out_dir: Path):
     ks = sorted(scores["recall_at_k"])
     rec = [scores["recall_at_k"][k] for k in ks]
     pre = [scores["precision_at_k"][k] for k in ks]
+
+    # Save data as CSV for custom plotting
+    data = {
+        'k': ks,
+        'recall': rec,
+        'precision': pre
+    }
+    df = pd.DataFrame(data)
+    csv_path = out_dir / f"{model_name}_recall_precision.csv"
+    df.to_csv(csv_path, index=False)
 
     plt.figure(figsize=(8, 5))
     plt.plot(ks, rec, 'o-', label="Recall@K")
