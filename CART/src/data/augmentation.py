@@ -169,7 +169,8 @@ def plot_2d(
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.grid(alpha=0.3);
     out.parent.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout(); plt.savefig(out, dpi=300)
+    plt.tight_layout(); 
+    plt.savefig(out.with_suffix('.png'), dpi=300)
     plt.close()
     log.info(f"Saved plot: {out}")
 
@@ -201,8 +202,10 @@ def write_fasta(seqs: List[str], out: Path) -> None:
 
 def parse_args(args_list=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Augment CAR-T sequences")
-    parser.add_argument('--wt_cd28', type=Path, default=Path('../fasta/wt_cd28.fasta'))
-    parser.add_argument('--wt_cd3z', type=Path, default=Path('../fasta/wt_cd3z.fasta'))
+    parser.add_argument('--domain_1', '--wt_cd28', type=Path, default=Path('../fasta/wt_cd28.fasta'), dest='wt_cd28',
+                       help="Path to fasta of domain 1 (e.g., CD28 hinge and transmembrane domain)")
+    parser.add_argument('--domain_2', '--wt_cd3z', type=Path, default=Path('../fasta/wt_cd3z.fasta'), dest='wt_cd3z',
+                       help="Path to fasta of domain 2 (e.g., CD3z intracellular domain)")
     parser.add_argument('--uniprot_db', type=Path, default=Path('../fasta/uniprot_trembl.fasta'))
     parser.add_argument('--output_dir', type=Path, default=Path('../../output/augmented'))
     parser.add_argument('--plots_dir', type=Path, default=Path('../../output/plots'))
