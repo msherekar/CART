@@ -1,6 +1,6 @@
 # CART-Project: CAR-T Cell Activity Prediction System
 
-A computational framework for predicting CAR-T cell activity by fine-tuning ESM-2 protein language models with sequence augmentation. This project reproduces/implements the methodology from *Enhancing CAR-T cell activity prediction via fine-tuning protein language models with generated CAR sequences* (https://www.biorxiv.org/content/10.1101/2025.03.27.645831v1.full)* and provides both research-grade experiment tools and a user-friendly web interface.
+A computational framework for predicting CAR-T cell activity by fine-tuning ESM-2 protein language models with sequence augmentation. This project reproduces/implements the methodology from **[Enhancing CAR-T cell activity prediction via fine-tuning protein language models with generated CAR sequences](https://www.biorxiv.org/content/10.1101/2025.03.27.645831v1.full)* and provides both research-grade experiment tools and a user-friendly web interface.
 
 ## Overview
 
