@@ -12,10 +12,10 @@ A computational framework for predicting CAR-T cell activity by fine-tuning ESM-
 
 ## Original Paper
 
-- **Title**: [Enhancing CAR-T cell activity prediction via fine-tuning protein language models with generated CAR sequences]
-- **Authors**: [Kei Yoshida, Shoji Hisada, Ryoichi Takase, Atsushi Okuma, Yoshihito Ishida, Taketo Kawara, Takuya Miura-Yamashita, Daisuke Ito]
-- **Published**: [Biorxiv, 04/01/2025]
-- **Paper Link**: [https://doi.org/10.1101/2025.03.27.645831 ]
+- **Title**: Enhancing CAR-T cell activity prediction via fine-tuning protein language models with generated CAR sequences
+- **Authors**: Kei Yoshida, Shoji Hisada, Ryoichi Takase, Atsushi Okuma, Yoshihito Ishida, Taketo Kawara, Takuya Miura-Yamashita, Daisuke Ito
+- **Published**: Biorxiv, 04/01/2025
+- **Paper Link**: https://doi.org/10.1101/2025.03.27.645831
 - **Original Code**: ["Not available"]
 
 **Abstract Summary**: The original work developed a computational framework to predict CAR-T cell activity by fine-tuning ESM-2 with CAR sequences generated using sequence augmentation. The study addressed the challenge of applying protein language models to artificial CAR constructs by creating training data through recombining homologous CAR domains. Experimental validation showed that fine-tuned ESM-2 significantly improves prediction performance, with training parameters like sequence diversity, training steps, and model size substantially influencing results.
