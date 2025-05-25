@@ -6,19 +6,19 @@ A computational framework for predicting CAR-T cell activity by fine-tuning ESM-
 
 **Problem**: CAR (Chimeric Antigen Receptor) is a synthetic protein introduced into T cells to direct their activity against cancer. While CAR-T therapies have revolutionized the treatment of certain cancers, their efficacy remains inconsistent, especially for solid tumors. Designing better CARs is limited by two major challenges:
 
-  **1.)**The artificial nature of CARs means there's a lack of evolutionary information—standard pretraining approaches like evotuning don't apply.
-  **2.)**There are no public large-scale CAR sequence databases due to proprietary restrictions, limiting data availability for machine learning.
+  **1.**The artificial nature of CARs means there's a lack of evolutionary information—standard pretraining approaches like evotuning don't apply.
+  **2.**There are no public large-scale CAR sequence databases due to proprietary restrictions, limiting data availability for machine learning.
 
 
 **Solution**: To tackle these issues, Kei Yoshida et al. proposed a computational framework (published in 2024) that uses protein language models (PLMs) fine-tuned with synthetically generated CAR sequences to predict cytotoxicity outcomes of CAR-T cells. This project recreates that unpublished codebase as a reproducible AI system.
 
 **Key Contributions**:
 
-**1.)**Implemented a full training and evaluation pipeline using ESM-2 PLMs with support for model sizes ranging from 8M to 3B parameters.
+**1.**Implemented a full training and evaluation pipeline using ESM-2 PLMs with support for model sizes ranging from 8M to 3B parameters.
 
-**2.)**Developed a web-based interface to allow scientists to experiment with different CAR sequences, fine-tune models, assess the effect of training parameters, and visualize sequence diversity.
+**2.**Developed a web-based interface to allow scientists to experiment with different CAR sequences, fine-tune models, assess the effect of training parameters, and visualize sequence diversity.
 
-**3.)**Integrated the ability to run experiments from a module or a Docker container (with HMMER omitted due to >100GB size).
+**3.**Integrated the ability to run experiments from a module or a Docker container (with HMMER omitted due to >100GB size).
 
 **Utility**: This system will enable researchers to develop personalized CAR constructs by providing a prediction mechanism for new mutations. The only inputs required are a wild-type CAR sequence, a set of mutants, their experimental cytotoxicity values, and access to a local UniProt(Trembl) database.
 
@@ -36,8 +36,6 @@ A computational framework for predicting CAR-T cell activity by fine-tuning ESM-
 - **Original Code**: ["Not available"]
 
 **Abstract Summary**: The original work developed a computational framework to predict CAR-T cell activity by fine-tuning ESM-2 with CAR sequences generated using sequence augmentation. The study addressed the challenge of applying protein language models to artificial CAR constructs by creating training data through recombining homologous CAR domains. Experimental validation showed that fine-tuned ESM-2 significantly improves prediction performance, with training parameters like sequence diversity, training steps, and model size substantially influencing results.
-
-
 
 ## Repository Structure
 
