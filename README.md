@@ -4,7 +4,7 @@ A computational framework for predicting CAR-T cell activity by fine-tuning ESM-
 
 **My Motivation**: This project was developed to showcase my ability to reproduce published methodology. The original paper proposing this framework did not release any source code, making this a challenging and rewarding exercise in scientific replication, protein machine learning and software engineering. It was also an opportunity to design an end-to-end AI system that could help biologists and immunologists apply machine learning to their own CAR constructs.
 
-*Note*: I could not reproduce the exact results from the paper because the authors have not provided the cytotoxicity data. However, I have successfully implemented their methodology so that *any researcher can plug in their own CAR sequences and cytotoxicity data* to train and evaluate a prediction model tailored to their CAR-T constructs.
+*Note*: I could not reproduce the exact results from the paper because the authors have not provided the cytotoxicity data. However, I have successfully implemented their methodology so that **any researcher can plug in their own CAR sequences and cytotoxicity data** to train and evaluate a prediction model tailored to their CAR-T constructs.
 
 **Problem**: CAR (Chimeric Antigen Receptor) is a synthetic protein introduced into T cells to direct their activity against cancer. While CAR-T therapies have revolutionized the treatment of certain cancers, their efficacy remains inconsistent, especially for solid tumors. Designing better CARs is limited by two major challenges:
 
