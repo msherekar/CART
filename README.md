@@ -103,7 +103,7 @@ conda activate finetune
 Launch the interactive web interface for easy pipeline usage:
 
 ```bash
-cd CAR-Project
+cd CART-Project
 streamlit run app.py
 ```
 
@@ -223,20 +223,12 @@ Available steps: `augmentation`, `mds`, `mutants`, `finetuning`, `embeddings`, `
 
 ### Training Details
 - **Hardware**: [Apple Mac M1, 16GB]
-- **Training Time**: [Hours/days]
 - **Batch Size**: Configurable (default varies by model size)
 - **Learning Rate**: [Rate and schedule]
 - **Optimizer**: [Adam, AdamW, etc.]
 - **Cross-Validation**: K-fold validation (configurable folds)
 - **Early Stopping**: Based on validation loss
 - **Checkpointing**: Automatic model saving at best performance
-
-### Hyperparameters
-Key hyperparameters used (can reference config files):
-- Learning rate: [value]
-- Batch size: [value]
-- Number of epochs: [value]
-- [Other relevant hyperparameters]
 
 ## Results Analysis
 
@@ -286,18 +278,7 @@ Key hyperparameters used (can reference config files):
 - `setup.py`: Package installation configuration
 
 ## Dependencies
-
-Key dependencies (see `requirements.txt` for full list):
-- Python >= 3.8
-- PyTorch >= 1.12
-- Transformers >= 4.20
-- Streamlit >= 1.20
-- ESM (Facebook's protein language model)
-- BioPython
-- Pandas, NumPy, Scikit-learn
-- Plotly (for interactive visualizations)
-- Weights & Biases (optional, for experiment tracking)
-- MLflow (optional, for experiment tracking)
+Refer to the environment.yml file
 
 ## Deployment
 
@@ -322,7 +303,7 @@ docker run -v $(pwd)/data:/app/data cart-project python run_experiments.py --exp
 
 To ensure reproducibility:
 - All random seeds are fixed across experiments
-- Exact package versions specified in requirements.txt
+- Exact package versions specified in environment.yml
 - Training configurations saved in config files and experiment logs
 - Model checkpoints include hyperparameters and training metadata
 - Cross-validation ensures robust performance estimates
