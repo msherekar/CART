@@ -1,0 +1,37 @@
+# Directories
+CART/embeddings
+CART/mlruns
+CART/wandb
+CART/results
+CART/checkpoints
+CART/models
+CART/mutants
+CART/data
+CART/docs
+CART/output
+CART/plots
+CART/predictions
+output
+plots
+predictions
+
+# database files
+fasta/uniprot_sprot.fasta
+fasta/uniprot_trembl.fasta
+# Files
+
+*.json
+*.jsonl
+*.jsonl.gz
+*.jsonl.gz.part
+*.jsonl.gz.part.tmp
+
+# python files
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+
+# Mac files
+.DS_Store
