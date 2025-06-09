@@ -1,52 +1,82 @@
 [build-system]
-requires = ["setuptools>=75.8.2", "wheel>=0.45.1"]
+requires = ["setuptools>=65.5.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+include = ["CART*"]
+exclude = ["output*", "tests*", "notebooks*"]
+
 [project]
-name = "CART"
+name = "cart-pipeline"
 version = "0.1.0"
-description = "AI pipeline for CAR-T sequence augmentation, modeling, and prediction"
+description = "AI pipeline for CAR-T sequence augmentation, modeling, and cytotoxicity prediction"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-  { name="Mukul Sherekar" }
+  { name = "Mukul Sherekar" }
 ]
-license = { text="Private" }
+license = "MIT"
+
 dependencies = [
-    # Core dependencies
+    # Core scientific stack
     "numpy>=1.26.4",
     "scipy>=1.15.2",
     "scikit-learn>=1.6.1",
     "pandas>=2.2.3",
     "matplotlib>=3.10.1",
     "seaborn>=0.13.2",
-    "typer>=0.12.3",
     "tqdm>=4.67.1",
     "biopython>=1.85",
+    "pyyaml>=6.0",
+    "python-Levenshtein>=0.23.0",
+    "statsmodels>=0.13.0",
+    
+
     # Deep learning
     "torch>=2.6.0",
     "transformers>=4.51.3",
+    "pytorch-lightning>=2.5.1",
+    "lightning>=2.5.1",
+
     # Visualization
     "plotly>=5.3.0",
     "umap-learn>=0.5.2",
-    # Experiment tracking
-    "mlflow>=2.11.3",
-    "wandb>=0.17.4",
-    # Additional dependencies
+
+    # API and CLI
     "fastapi>=0.115.12",
     "uvicorn>=0.34.1",
     "gunicorn>=21.2.0",
-    "pydantic>=2.7.0",
+    "typer>=0.12.3",
     "requests>=2.32.3",
+    "pydantic>=2.7.0",
+    "python-multipart",
+
+    # Tracking / Logging (optional installs)
+    "mlflow>=2.11.3",
+    "wandb>=0.17.4",
+
+    # Others
     "pytest>=8.3.5",
     "pytest-cov>=2.12.0",
-    "hmmer>=3.4.0.2",
+]
+
+[project.optional-dependencies]
+tracking = [
+    "mlflow>=2.11.3",
+    "wandb>=0.17.4"
+]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-cov>=2.12.0"
 ]
 
 [project.urls]
-Homepage = "https://github.com/msherekar/CART"
+homepage = "https://github.com/msherekar/CART"
 
-[project.entry-points.console_scripts]
+[project.scripts]
 cart = "CART.src.cli:app"
 
 [tool.pytest.ini_options]
