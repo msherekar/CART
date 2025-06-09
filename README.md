@@ -1,20 +1,19 @@
 # CAR-T Cell Activity Prediction System
 
-A system for predicting CAR-T cell activity by fine-tuning ESM-2 protein language models with sequence augmentation. This project implements the methodology from *[Enhancing CAR-T cell activity prediction via fine-tuning protein language models with generated CAR sequences](https://www.biorxiv.org/content/10.1101/2025.03.27.645831v1.full)* and provides both research-grade experiment tools and a user-friendly web interface.
+A system for predicting CAR-T cell activity by fine-tuning ESM-2 protein language models with sequence augmentation. This repository implements the methodology from *[Enhancing CAR-T cell activity prediction via fine-tuning protein language models with generated CAR sequences](https://www.biorxiv.org/content/10.1101/2025.03.27.645831v1.full)*. Teh system provides both research-grade experiment tools and a user-friendly web interface.
 
-**Motivation**: The original paper proposing this framework did not release any source code, making this a challenging and rewarding exercise in protein machine learning and software engineering. It was also an opportunity to design an end-to-end AI system that could help biologists and immunologists apply machine learning to their own CAR constructs.
+**Motivation**: The original paper proposing this framework did not release any source code, making this a challenging and rewarding exercise in protein machine learning and software engineering. It was also an opportunity to design an end-to-end AI system that could help immunologists apply machine learning to their own CAR constructs.
 
-*Note*: The aim was not to reproduce the exact results from the paper because the authors have not provided the cytotoxicity data. However, I have successfully implemented their methodology so that **any researcher can plug in their own CAR sequences and cytotoxicity data** to train and evaluate a prediction model tailored to their CAR-T constructs.
+**Problem**: CAR (Chimeric Antigen Receptor) is a synthetic protein introduced into T cells to direct their activity against cancer. As per the paper, designing better CARs is limited by two major challenges:
 
-**Problem**: CAR (Chimeric Antigen Receptor) is a synthetic protein introduced into T cells to direct their activity against cancer. Designing better CARs is limited by two major challenges:
-
-  **1.)** The artificial nature of CARs means there's a lack of evolutionary information—standard pretraining approaches like evotuning don't apply.
+  **1.)** The artificial nature of CARs means there's a lack of evolutionary information. This means standard pretraining approaches like evotuning don't apply.
   
   **2.)** There are no public large-scale CAR sequence databases due to proprietary restrictions, limiting data availability for machine learning.
 
 
 **Solution**: To tackle these issues, Kei Yoshida et al. proposed a computational framework (published in 2024) that uses protein language models (PLMs) fine-tuned with synthetically generated CAR sequences to predict cytotoxicity outcomes of CAR-T cells. This project recreates that unpublished codebase as a reproducible AI system.
 
+*Note*: The aim was not to reproduce the exact results from the paper because the authors have not provided the cytotoxicity data. However, I have successfully implemented their methodology so that **any researcher can plug in their own CAR sequences and cytotoxicity data** to train and evaluate a prediction model tailored to their CAR-T constructs.
 **Key Contributions**:
 
 **1.)** Implemented a full training and evaluation pipeline using ESM-2 PLMs with support for model sizes ranging from 8M to 3B parameters.
