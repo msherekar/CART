@@ -92,7 +92,9 @@ cd CART-Project
 pip install -e .
 
 # Virtual Environment
-conda install environment.yml
+conda env create --file environment.yml
+conda activate finetune
+
 ```
 ## Usage
 
