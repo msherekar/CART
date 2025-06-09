@@ -13,7 +13,7 @@ A system for predicting CAR-T cell activity by fine-tuning ESM-2 protein languag
 
 **Solution**: To tackle these issues, Kei Yoshida et al. proposed a computational framework (published in April 2025) that uses protein language models (PLMs) fine-tuned with synthetically generated CAR sequences to predict cytotoxicity outcomes of CAR-T cells. This repository recreates that unpublished codebase as a reproducible AI system.
 
-**Objective**: Create a codebase to implemented paper methodology so that **any researcher can plug in their own CAR sequences and cytotoxicity data** to train and evaluate a prediction model tailored to their CAR-T constructs. The objective was not to reproduce the exact results from the paper because the authors have not provided the cytotoxicity data.
+**Objective**: Create a codebase to implement paper methodology so that **any researcher can plug in their own CAR sequences and cytotoxicity data** to train and evaluate a prediction model tailored to their CAR-T constructs. The objective was not to reproduce the exact results from the paper because the authors have not provided the cytotoxicity data.
 
 **Key Contributions**:
 
