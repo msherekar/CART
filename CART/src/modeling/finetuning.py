@@ -221,16 +221,19 @@ def run_finetuning(args, group: str):
                                         generator=torch.Generator().manual_seed(42))
         
         # Use the adjusted batch size
+        data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=0.15)
         train_loader = DataLoader(
             train_ds, 
             batch_size=actual_batch_size, 
             shuffle=True, 
+            collate_fn=data_collator,
             pin_memory=not args.no_pin_memory
         )
         val_loader = DataLoader(
             val_ds, 
             batch_size=actual_batch_size, 
             shuffle=False, 
+            collate_fn=data_collator,
             pin_memory=not args.no_pin_memory
         )
         

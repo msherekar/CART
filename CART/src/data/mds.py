@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 # --- Constants ---
 AA_LIST = "ACDEFGHIKLMNPQRSTVWY"
 AA_TO_IDX = {aa: i for i, aa in enumerate(AA_LIST)}
-DEFAULT_SAMPLE_FRAC = 0.1
+DEFAULT_SAMPLE_FRAC = 1.0
 DEFAULT_RANDOM_STATE = 42
 
 

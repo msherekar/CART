@@ -14,7 +14,7 @@ def callback():
 
 @app.command()
 def run(
-    steps: list[str] = typer.Option(['all'], help="Steps to run"),
+    steps: list[str] = typer.Argument(None, help="Steps to run (default: all)"),
     fasta_dir: Path = typer.Option(Path('fasta'), help="Directory containing FASTA files"),
     output_dir: Path = typer.Option(Path('output'), help="Directory for output files"),
     model_dir: Path = typer.Option(None, help="Directory for model files (default: output_dir/models)"),
@@ -26,6 +26,8 @@ def run(
     wt_car: Path = typer.Option(None, help="Path to CAR sequence FASTA file (optional, for mutations)")
 ):
     """Run the CART pipeline with specified steps and parameters."""
+    if steps is None:
+        steps = ['all']
     run_pipeline(
         steps, fasta_dir, output_dir, model_dir,
         domain_1, domain_2, cytotox_csv, esm_model,

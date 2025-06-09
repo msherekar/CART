@@ -147,7 +147,7 @@ def run_pipeline(
                 '--low_fasta', str(output_dir/'augmentation'/'low_diversity.fasta'),
                 '--output_dir', str(model_dir),
                 '--model_name', str(esm_model),
-                '--max_epochs', '1'
+                '--max_epochs', '51'
             ])
             run_finetuning(ft_args, group)
 

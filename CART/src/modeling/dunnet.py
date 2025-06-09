@@ -22,9 +22,9 @@ def get_project_root() -> Path:
 
 def parse_args(args_list=None):
     project_root = get_project_root()
-    results_dir = project_root / "CART" / "output" / "results"
+    results_dir = project_root / "output" / "results"
     
-    parser = argparse.ArgumentParser(description="Run Dunnett's test for multiple comparison procedure")
+    parser = argparse.ArgumentParser(description="Run Dunnett's test for protein language model comparison")
     parser.add_argument(
         "--results_dir", 
         type=Path, 
@@ -32,16 +32,16 @@ def parse_args(args_list=None):
         help="Directory containing model prediction results"
     )
     parser.add_argument(
-        "--control_model", 
+        "--baseline_model", 
         type=str, 
         default="pretrained",
-        help="Name of the control model (without _spearman.npy suffix)"
+        help="Name of the baseline model (typically pretrained, without file suffix)"
     )
     parser.add_argument(
-        "--treatment_models", 
+        "--finetuned_models", 
         type=str, 
         nargs="+",
-        help="Names of treatment models to compare against control (without _spearman.npy suffix)"
+        help="Names of fine-tuned models to compare against baseline (without file suffix)"
     )
     parser.add_argument(
         "--output_dir", 
@@ -58,7 +58,7 @@ def parse_args(args_list=None):
     parser.add_argument(
         "--plot", 
         action="store_true",
-        help="Generate comparison plots"
+        help="Generate comprehensive comparison plots"
     )
     
     # Only parse command line arguments if this module is run directly
@@ -69,160 +69,498 @@ def parse_args(args_list=None):
         return parser.parse_args(args_list or [])
 
 def load_spearman_scores(results_dir, model_name):
-    """Load Spearman correlation scores for a model"""
-    # Try multiple possible file patterns
-    possible_patterns = [
+    """Load Spearman correlation scores for a model with consolidated file pattern checking."""
+    # Consolidated file patterns - order by preference
+    file_patterns = [
+        # Direct spearman files
         f"{model_name}_spearman.npy",
         f"{model_name}_correlations.npy",
-        f"pll_results_{model_name}_spearman.npy"
-    ]
-    
-    for pattern in possible_patterns:
-        file_path = results_dir / pattern
-        if file_path.exists():
-            scores = np.load(file_path)
-            if isinstance(scores, np.ndarray):
-                if scores.dtype == np.dtype('O'):  # Object array, need to extract the right field
-                    return scores.item().get('spearman', scores)
-                else:
-                    return scores
-            else:
-                return scores
-    
-    # Also check if scores are within a .npz file
-    npz_patterns = [
+        f"pll_results_{model_name}_spearman.npy",
+        # NPZ files
         f"{model_name}_predictions.npz",
         f"{model_name}_correlations.npz"
     ]
     
-    for pattern in npz_patterns:
+    # Check regular files first
+    for pattern in file_patterns[:3]:
+        file_path = results_dir / pattern
+        if file_path.exists():
+            scores = np.load(file_path)
+            # Handle different array types
+            if isinstance(scores, np.ndarray):
+                if scores.dtype == np.dtype('O'):  # Object array
+                    return scores.item().get('spearman', scores)
+                return scores
+            return scores
+    
+    # Check NPZ files
+    npz_keys = ['spearman', 'spearman_rhos']
+    for pattern in file_patterns[3:]:
         file_path = results_dir / pattern
         if file_path.exists():
             data = np.load(file_path)
-            if 'spearman' in data:
-                return data['spearman']
-            if 'spearman_rhos' in data:
-                return data['spearman_rhos']
+            for key in npz_keys:
+                if key in data:
+                    return data[key]
     
     raise FileNotFoundError(f"Could not find Spearman scores for {model_name} in {results_dir}")
 
 def find_available_models(results_dir):
-    """Find all available model results in the predictions directory"""
+    """Find all available model results with consolidated pattern matching."""
     models = set()
     
-    # Check for spearman.npy files
-    pattern = str(results_dir / "*_spearman.npy")
-    files = glob.glob(pattern)
-    for f in files:
-        models.add(Path(f).stem.replace("_spearman", ""))
+    # Consolidated file patterns and their corresponding model name extraction
+    patterns_and_replacements = [
+        ("*_spearman.npy", "_spearman"),
+        ("*_correlations.npy", "_correlations"),
+        ("*_predictions.npz", "_predictions"),
+        ("pll_results_*.npy", "pll_results_")
+    ]
     
-    # Check for predictions.npz files
-    pattern = str(results_dir / "*_predictions.npz")
-    files = glob.glob(pattern)
-    for f in files:
-        models.add(Path(f).stem.replace("_predictions", ""))
+    for pattern, replacement in patterns_and_replacements:
+        files = glob.glob(str(results_dir / pattern))
+        for f in files:
+            if replacement.startswith("pll_results_"):
+                # Special handling for pll_results prefix
+                model_name = Path(f).stem.replace(replacement, "")
+            else:
+                # Standard suffix removal
+                model_name = Path(f).stem.replace(replacement, "")
+            if model_name:  # Only add non-empty model names
+                models.add(model_name)
     
-    # Check for correlations.npy files
-    pattern = str(results_dir / "*_correlations.npy")
-    files = glob.glob(pattern)
-    for f in files:
-        models.add(Path(f).stem.replace("_correlations", ""))
-    
-    # Check for pll files
-    pattern = str(results_dir / "pll_results_*.npy")
-    files = glob.glob(pattern)
-    for f in files:
-        models.add(Path(f).stem.replace("pll_results_", ""))
-    
-    return list(models)
+    return sorted(list(models))  # Return sorted for consistency
 
-def plot_comparison(control_name, treatment_names, statistics, p_values, output_dir):
-    """Generate comparison plots for Dunnett's test results"""
-    # Create a dataframe for plotting
-    result_df = pd.DataFrame({
-        'Model': treatment_names,
-        'Test Statistic': statistics,
-        'p-value': p_values,
-        'Significant': p_values < 0.05
-    })
+def create_results_dataframe(control_name, model_names, padded_scores, result, alpha):
+    """Create a comprehensive results dataframe."""
+    results_list = []
+    control_scores = padded_scores[0]
     
-    # Plot test statistics
+    # DunnettResult has statistic and pvalue arrays, one for each treatment vs control comparison
+    for i in range(len(result.statistic)):
+        treatment_idx = i + 1  # Treatment models start at index 1 (control is at 0)
+        treatment_scores = padded_scores[treatment_idx]
+        
+        # Calculate Cohen's d (effect size)
+        mean_control = np.nanmean(control_scores)
+        mean_treatment = np.nanmean(treatment_scores)
+        std_control = np.nanstd(control_scores)
+        std_treatment = np.nanstd(treatment_scores)
+        
+        # Pooled standard deviation for Cohen's d
+        n_control = np.sum(~np.isnan(control_scores))
+        n_treatment = np.sum(~np.isnan(treatment_scores))
+        pooled_std = np.sqrt(((n_control - 1) * std_control**2 + (n_treatment - 1) * std_treatment**2) / 
+                            (n_control + n_treatment - 2))
+        
+        cohens_d = (mean_treatment - mean_control) / pooled_std if pooled_std > 0 else 0
+        
+        results_list.append({
+            'baseline_model': control_name,
+            'finetuned_model': model_names[treatment_idx],
+            'statistic': result.statistic[i],
+            'p_value': result.pvalue[i],
+            'significant': result.pvalue[i] < alpha,
+            'mean_baseline': mean_control,
+            'mean_finetuned': mean_treatment,
+            'improvement': mean_treatment - mean_control,
+            'std_baseline': std_control,
+            'std_finetuned': std_treatment,
+            'cohens_d': cohens_d,
+            'effect_size': 'large' if abs(cohens_d) >= 0.8 else 'medium' if abs(cohens_d) >= 0.5 else 'small'
+        })
+    
+    return pd.DataFrame(results_list)
+
+def save_results(results_df, model_names, padded_scores, output_dir):
+    """Save all results in a consolidated manner."""
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save raw scores
+    scores_df = pd.DataFrame({name: scores for name, scores in zip(model_names, padded_scores)})
+    scores_df.to_csv(output_dir / "spearman_correlations_by_model.csv", index=False)
+    
+    # Save test results
+    results_df.to_csv(output_dir / "dunnett_test_results.csv", index=False)
+    
+    # Save summary text file
+    with open(output_dir / "dunnett_results.txt", 'w') as f:
+        f.write("Dunnett's Test Results - Protein Language Model Comparison\n")
+        f.write("=" * 60 + "\n\n")
+        f.write("Statistical comparison of Spearman correlations between baseline and fine-tuned models\n")
+        f.write("for protein sequence-function prediction tasks.\n\n")
+        
+        for _, row in results_df.iterrows():
+            f.write(f"{row['finetuned_model']} vs {row['baseline_model']}:\n")
+            f.write(f"  Test statistic: {row['statistic']:.4f}\n")
+            f.write(f"  p-value: {row['p_value']:.4f}\n")
+            f.write(f"  Mean correlation improvement: {row['improvement']:.4f}\n")
+            f.write(f"  Cohen's d (effect size): {row['cohens_d']:.4f} ({row['effect_size']})\n")
+            significance = "significant" if row['significant'] else "not significant"
+            f.write(f"  Statistical significance: {significance}\n\n")
+    
+    return scores_df
+
+def plot_comparison(results_df, model_names, padded_scores, output_dir):
+    """Generate comprehensive comparison plots for protein language model evaluation."""
+    # Calculate means and standard deviations for all models
+    means = [np.nanmean(s) for s in padded_scores]
+    stds = [np.nanstd(s) for s in padded_scores]
+    
+    # Create individual plots first
+    
+    # Plot 1: Model Performance Comparison with Error Bars (Individual)
     plt.figure(figsize=(10, 6))
-    sns.barplot(x='Model', y='Test Statistic', hue='Significant', data=result_df)
-    plt.title(f'Dunnett Test Statistics (vs {control_name})')
-    plt.axhline(y=0, color='r', linestyle='-')
-    plt.grid(True, linestyle='--', alpha=0.7)
+    colors = ['steelblue'] + ['lightcoral' if sig else 'lightblue' 
+                              for sig in list(results_df['significant'])]
+    bars = plt.bar(model_names, means, yerr=stds, capsize=5, 
+                   color=colors, alpha=0.8, edgecolor='black', linewidth=1)
+    plt.title('Protein Language Model Performance\n(Spearman Correlation)', fontsize=14, fontweight='bold')
+    plt.ylabel('Spearman Correlation (ρ)', fontsize=12)
+    plt.xlabel('Model Type', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.3)
+    plt.xticks(rotation=45)
+    
+    # Add value labels on bars
+    for bar, mean, std in zip(bars, means, stds):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + std + 0.01,
+                f'{mean:.3f}±{std:.3f}', ha='center', va='bottom', fontsize=10)
+    
     plt.tight_layout()
-    plt.savefig(output_dir / 'dunnett_statistics.png', dpi=300, bbox_inches='tight')
+    plt.savefig(output_dir / 'model_performance_comparison.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    # Plot p-values
+    # Plot 2: Dunnett Test Statistics (Individual) - Include baseline as reference
     plt.figure(figsize=(10, 6))
-    ax = sns.barplot(x='Model', y='p-value', data=result_df)
-    plt.title(f'P-values (vs {control_name})')
-    plt.axhline(y=0.05, color='r', linestyle='-', label='α=0.05')
+    # Add baseline model with statistic = 0 (reference point)
+    all_models = [model_names[0]] + results_df['finetuned_model'].tolist()
+    test_stats = [0] + results_df['statistic'].tolist()  # Baseline has 0 statistic
+    sig_colors = ['steelblue'] + ['red' if sig else 'lightblue' for sig in results_df['significant']]
+    
+    bars = plt.bar(all_models, test_stats, color=sig_colors, alpha=0.8, 
+                   edgecolor='black', linewidth=1)
+    plt.title('Statistical Significance Test\n(Dunnett Test)', fontsize=14, fontweight='bold')
+    plt.ylabel('Test Statistic', fontsize=12)
+    plt.xlabel('Model', fontsize=12)
+    plt.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    plt.grid(True, linestyle='--', alpha=0.3)
+    plt.xticks(rotation=45)
+    
+    # Add value labels
+    for bar, stat in zip(bars, test_stats):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                f'{stat:.3f}', ha='center', va='bottom', fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'dunnett_test_statistics.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Plot 3: P-values (Individual) - Only for fine-tuned models
+    plt.figure(figsize=(10, 6))
+    finetuned_models = results_df['finetuned_model'].tolist()
+    p_values = results_df['p_value'].tolist()
+    sig_colors = ['red' if sig else 'lightblue' for sig in results_df['significant']]
+    
+    bars = plt.bar(finetuned_models, p_values, color=sig_colors, alpha=0.8,
+                   edgecolor='black', linewidth=1)
+    plt.title('Statistical Significance\n(p-values vs Baseline)', fontsize=14, fontweight='bold')
+    plt.ylabel('p-value', fontsize=12)
+    plt.xlabel('Fine-tuned Model', fontsize=12)
+    plt.axhline(y=0.05, color='red', linestyle='--', label='α=0.05', alpha=0.7, linewidth=2)
+    plt.grid(True, linestyle='--', alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.legend()
     
     # Add significance indicators
-    for i, p in enumerate(p_values):
-        significance = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
-        plt.text(i, p + 0.01, significance, ha='center')
+    for bar, p, sig in zip(bars, p_values, results_df['significant']):
+        height = bar.get_height()
+        symbol = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.005,
+                symbol, ha='center', va='bottom', fontsize=12, fontweight='bold')
     
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend()
     plt.tight_layout()
-    plt.savefig(output_dir / 'dunnett_pvalues.png', dpi=300, bbox_inches='tight')
+    plt.savefig(output_dir / 'p_values_significance.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Plot 4: Cohen's d (Individual) - Include baseline as reference
+    plt.figure(figsize=(10, 6))
+    # Add baseline model with Cohen's d = 0 (reference point)
+    all_models = [model_names[0]] + results_df['finetuned_model'].tolist()
+    cohens_d_values = [0] + results_df['cohens_d'].tolist()  # Baseline has 0 effect size
+    effect_colors = ['steelblue'] + ['darkgreen' if abs(d) >= 0.8 else 'orange' if abs(d) >= 0.5 else 'lightgray' 
+                                     for d in results_df['cohens_d'].tolist()]
+    
+    bars = plt.bar(all_models, cohens_d_values, color=effect_colors, alpha=0.8,
+                   edgecolor='black', linewidth=1)
+    plt.title('Effect Size Analysis\n(Cohen\'s d)', fontsize=14, fontweight='bold')
+    plt.ylabel('Cohen\'s d', fontsize=12)
+    plt.xlabel('Model', fontsize=12)
+    plt.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    plt.axhline(y=0.5, color='orange', linestyle=':', alpha=0.7, label='Medium effect')
+    plt.axhline(y=0.8, color='green', linestyle=':', alpha=0.7, label='Large effect')
+    plt.axhline(y=-0.5, color='orange', linestyle=':', alpha=0.7)
+    plt.axhline(y=-0.8, color='green', linestyle=':', alpha=0.7)
+    plt.grid(True, linestyle='--', alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.legend()
+    
+    # Add value labels
+    for bar, d in zip(bars, cohens_d_values):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                f'{d:.3f}', ha='center', va='bottom', fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'cohens_d_effect_size.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Plot 5: Performance Improvement (Individual) - Show absolute performance + improvement
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Left: Absolute performance with baseline
+    ax1.bar(model_names, means, yerr=stds, capsize=5, 
+            color=colors, alpha=0.8, edgecolor='black', linewidth=1)
+    ax1.set_title('Absolute Performance', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Spearman Correlation (ρ)', fontsize=11)
+    ax1.set_xlabel('Model', fontsize=11)
+    ax1.grid(True, linestyle='--', alpha=0.3)
+    ax1.tick_params(axis='x', rotation=45)
+    
+    for bar, mean, std in zip(ax1.patches, means, stds):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height + std + 0.01,
+                f'{mean:.3f}', ha='center', va='bottom', fontsize=9)
+    
+    # Right: Improvement relative to baseline
+    improvements = results_df['improvement'].tolist()
+    improvement_colors = ['green' if imp > 0 else 'red' for imp in improvements]
+    
+    ax2.bar(finetuned_models, improvements, color=improvement_colors, alpha=0.8,
+            edgecolor='black', linewidth=1)
+    ax2.set_title('Performance Improvement\n(vs Baseline)', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Δ Spearman Correlation', fontsize=11)
+    ax2.set_xlabel('Fine-tuned Model', fontsize=11)
+    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax2.grid(True, linestyle='--', alpha=0.3)
+    ax2.tick_params(axis='x', rotation=45)
+    
+    for bar, imp in zip(ax2.patches, improvements):
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2., height + 0.002,
+                f'{imp:+.3f}', ha='center', va='bottom', fontsize=9)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'performance_improvement.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Plot 6: Summary Statistics Table (Individual)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.axis('tight')
+    ax.axis('off')
+    
+    # Create summary table including baseline
+    table_data = []
+    # Add baseline row
+    baseline_mean = means[0]
+    baseline_std = stds[0]
+    table_data.append([
+        model_names[0] + " (baseline)",
+        f"{baseline_mean:.3f}",
+        "0.000",  # No improvement vs itself
+        "0.000",  # No effect size vs itself
+        "—",      # No p-value vs itself
+        "—"       # No significance vs itself
+    ])
+    
+    # Add fine-tuned model rows
+    for _, row in results_df.iterrows():
+        table_data.append([
+            row['finetuned_model'],
+            f"{row['mean_finetuned']:.3f}",
+            f"{row['improvement']:+.3f}",
+            f"{row['cohens_d']:.3f}",
+            f"{row['p_value']:.3f}",
+            "✓" if row['significant'] else "✗"
+        ])
+    
+    table = ax.table(cellText=table_data,
+                     colLabels=['Model', 'Mean ρ', 'Δρ', 'Cohen\'s d', 'p-value', 'Sig.'],
+                     cellLoc='center',
+                     loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1.3, 2)
+    ax.set_title('Summary Statistics - Protein Language Model Comparison', 
+                 fontsize=14, fontweight='bold', pad=20)
+    
+    # Color code the significance column (skip baseline row)
+    for i in range(1, len(table_data)):
+        if table_data[i][5] == "✓":
+            table[(i+1, 5)].set_facecolor('#90EE90')  # Light green
+        elif table_data[i][5] == "✗":
+            table[(i+1, 5)].set_facecolor('#FFB6C1')  # Light red
+    
+    # Highlight baseline row
+    for j in range(6):
+        table[(1, j)].set_facecolor('#E6E6FA')  # Light lavender for baseline
+    
+    plt.savefig(output_dir / 'summary_statistics_table.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Now create the comprehensive figure with all subplots
+    fig = plt.figure(figsize=(20, 12))
+    
+    # Plot 1: Model Performance Comparison with Error Bars
+    ax1 = plt.subplot(2, 3, 1)
+    bars1 = ax1.bar(model_names, means, yerr=stds, capsize=5, 
+                    color=colors, alpha=0.8, edgecolor='black', linewidth=1)
+    ax1.set_title('Model Performance\n(Spearman Correlation)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Spearman Correlation (ρ)', fontsize=11)
+    ax1.set_xlabel('Model Type', fontsize=11)
+    ax1.grid(True, linestyle='--', alpha=0.3)
+    ax1.tick_params(axis='x', rotation=45)
+    
+    # Add value labels on bars
+    for bar, mean, std in zip(bars1, means, stds):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height + std + 0.01,
+                f'{mean:.3f}±{std:.3f}', ha='center', va='bottom', fontsize=9)
+    
+    # Plot 2: Dunnett Test Statistics (with baseline)
+    ax2 = plt.subplot(2, 3, 2)
+    all_models_short = [model_names[0]] + results_df['finetuned_model'].tolist()
+    test_stats_all = [0] + results_df['statistic'].tolist()
+    sig_colors_all = ['steelblue'] + ['red' if sig else 'lightblue' for sig in results_df['significant']]
+    
+    bars2 = ax2.bar(all_models_short, test_stats_all, color=sig_colors_all, alpha=0.8, 
+                    edgecolor='black', linewidth=1)
+    ax2.set_title('Dunnett Test Statistics', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Test Statistic', fontsize=11)
+    ax2.set_xlabel('Model', fontsize=11)
+    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax2.grid(True, linestyle='--', alpha=0.3)
+    ax2.tick_params(axis='x', rotation=45)
+    
+    # Plot 3: P-values
+    ax3 = plt.subplot(2, 3, 3)
+    bars3 = ax3.bar(finetuned_models, p_values, color=sig_colors[1:], alpha=0.8,
+                    edgecolor='black', linewidth=1)
+    ax3.set_title('P-values', fontsize=12, fontweight='bold')
+    ax3.set_ylabel('p-value', fontsize=11)
+    ax3.set_xlabel('Fine-tuned Model', fontsize=11)
+    ax3.axhline(y=0.05, color='red', linestyle='--', label='α=0.05', alpha=0.7, linewidth=2)
+    ax3.grid(True, linestyle='--', alpha=0.3)
+    ax3.tick_params(axis='x', rotation=45)
+    ax3.legend()
+    
+    # Plot 4: Cohen's d (with baseline)
+    ax4 = plt.subplot(2, 3, 4)
+    cohens_d_all = [0] + results_df['cohens_d'].tolist()
+    effect_colors_all = ['steelblue'] + ['darkgreen' if abs(d) >= 0.8 else 'orange' if abs(d) >= 0.5 else 'lightgray' 
+                                         for d in results_df['cohens_d'].tolist()]
+    
+    bars4 = ax4.bar(all_models_short, cohens_d_all, color=effect_colors_all, alpha=0.8,
+                    edgecolor='black', linewidth=1)
+    ax4.set_title('Effect Size (Cohen\'s d)', fontsize=12, fontweight='bold')
+    ax4.set_ylabel('Cohen\'s d', fontsize=11)
+    ax4.set_xlabel('Model', fontsize=11)
+    ax4.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax4.grid(True, linestyle='--', alpha=0.3)
+    ax4.tick_params(axis='x', rotation=45)
+    
+    # Plot 5: Performance Improvement
+    ax5 = plt.subplot(2, 3, 5)
+    improvements = results_df['improvement'].tolist()
+    improvement_colors = ['green' if imp > 0 else 'red' for imp in improvements]
+    
+    bars5 = ax5.bar(finetuned_models, improvements, color=improvement_colors, alpha=0.8,
+                    edgecolor='black', linewidth=1)
+    ax5.set_title('Performance Improvement', fontsize=12, fontweight='bold')
+    ax5.set_ylabel('Δ Spearman Correlation', fontsize=11)
+    ax5.set_xlabel('Fine-tuned Model', fontsize=11)
+    ax5.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax5.grid(True, linestyle='--', alpha=0.3)
+    ax5.tick_params(axis='x', rotation=45)
+    
+    # Plot 6: Summary Statistics Table (simplified for subplot)
+    ax6 = plt.subplot(2, 3, 6)
+    ax6.axis('tight')
+    ax6.axis('off')
+    
+    # Simplified table for subplot
+    simple_table_data = []
+    for _, row in results_df.iterrows():
+        simple_table_data.append([
+            row['finetuned_model'],
+            f"{row['mean_finetuned']:.3f}",
+            f"{row['improvement']:+.3f}",
+            f"{row['cohens_d']:.3f}",
+            "✓" if row['significant'] else "✗"
+        ])
+    
+    table = ax6.table(cellText=simple_table_data,
+                     colLabels=['Model', 'Mean ρ', 'Δρ', 'Cohen\'s d', 'Sig.'],
+                     cellLoc='center',
+                     loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.5)
+    ax6.set_title('Summary Statistics', fontsize=12, fontweight='bold')
+    
+    plt.suptitle('Protein Language Model Fine-tuning Evaluation\nSpearman Correlation Analysis', 
+                 fontsize=16, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.92)
+    plt.savefig(output_dir / 'comprehensive_comparison.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-def run_dunnet(args):
-    # Ensure results directory exists
+def run_dunnett(args):
+    """Run optimized Dunnett's test analysis."""
+    # Setup directories
     args.results_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Set default output directory if not provided
     if args.output_dir is None:
         args.output_dir = args.results_dir
     else:
         args.output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create a CSV directory for custom plotting data
-    csv_dir = args.output_dir / "csv"
-    csv_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Find available models if treatment models not specified
-    if args.treatment_models is None:
+    # Auto-detect treatment models if not specified
+    if args.finetuned_models is None:
         available_models = find_available_models(args.results_dir)
-        args.treatment_models = [m for m in available_models if m != args.control_model]
-        if not args.treatment_models:
-            print(f"Error: No treatment models found in {args.results_dir}")
-            return
+        args.finetuned_models = [m for m in available_models if m != args.baseline_model]
+        if not args.finetuned_models:
+            print(f"Error: No fine-tuned models found in {args.results_dir}")
+            print(f"Available models: {available_models}")
+            return None
     
-    print(f"Control model: {args.control_model}")
-    print(f"Treatment models: {args.treatment_models}")
+    print(f"Baseline model: {args.baseline_model}")
+    print(f"Fine-tuned models: {args.finetuned_models}")
     
-    # Load control model scores
+    # Load all scores
     try:
-        control_scores = load_spearman_scores(args.results_dir, args.control_model)
-        print(f"Control scores: {control_scores}")
+        control_scores = load_spearman_scores(args.results_dir, args.baseline_model)
+        all_scores = [control_scores]
+        model_names = [args.baseline_model]
+        
+        for model in args.finetuned_models:
+            try:
+                scores = load_spearman_scores(args.results_dir, model)
+                all_scores.append(scores)
+                model_names.append(model)
+            except FileNotFoundError as e:
+                print(f"Warning: {e}")
+        
+        if len(all_scores) < 2:
+            print("Error: Need at least one fine-tuned model with valid scores")
+            return None
+            
     except FileNotFoundError as e:
-        print(f"Error: {e}")
-        return
+        print(f"Error loading baseline model: {e}")
+        return None
     
-    # Prepare data array for Dunnett's test
-    all_scores = [control_scores]
-    model_names = [args.control_model]
-    
-    # Load treatment model scores
-    for model in args.treatment_models:
-        try:
-            scores = load_spearman_scores(args.results_dir, model)
-            all_scores.append(scores)
-            model_names.append(model)
-            print(f"{model} scores: {scores}")
-        except FileNotFoundError as e:
-            print(f"Warning: {e}")
-    
-    # Stack scores into shape (n_splits, n_groups)
-    # group 0 = control, groups 1+ = treatments
-    # Ensure all arrays have the same length by padding with NaN
+    # Prepare data for Dunnett's test
     max_len = max(len(s) for s in all_scores)
     padded_scores = []
     for scores in all_scores:
@@ -233,87 +571,51 @@ def run_dunnet(args):
         else:
             padded_scores.append(scores)
     
-    data = np.column_stack(padded_scores)
+    # Run Dunnett's test
+    # scipy.stats.dunnett expects: dunnett(*samples, control=control_array)
+    # where samples are individual 1D arrays, not a 2D matrix
+    control_data = padded_scores[0]
+    treatment_data = padded_scores[1:]  # All treatment groups
     
-    # Run Dunnett's test, control index = 0
-    result = dunnett(data, control=0)
+    # Remove NaN values for the test
+    control_clean = control_data[~np.isnan(control_data)]
+    treatment_clean = []
+    for treatment in treatment_data:
+        clean_treatment = treatment[~np.isnan(treatment)]
+        treatment_clean.append(clean_treatment)
     
-    # Save raw scores to CSV
-    scores_df = pd.DataFrame({name: scores for name, scores in zip(model_names, padded_scores)})
-    scores_df.to_csv(csv_dir / "spearman_scores_by_model.csv", index=False)
-    print(f"Saved raw Spearman scores to {csv_dir / 'spearman_scores_by_model.csv'}")
+    # Run Dunnett's test with proper format
+    result = dunnett(*treatment_clean, control=control_clean)
     
-    # Create results dataframe
-    results_list = []
-    for i, comp in enumerate(result.comparisons):
-        treatment_idx = comp[0]
-        results_list.append({
-            'control': args.control_model,
-            'treatment': model_names[treatment_idx],
-            'statistic': result.statistic[i],
-            'p_value': result.pvalue[i],
-            'significant': result.pvalue[i] < args.alpha,
-            'mean_control': np.nanmean(control_scores),
-            'mean_treatment': np.nanmean(padded_scores[treatment_idx]),
-            'difference': np.nanmean(padded_scores[treatment_idx]) - np.nanmean(control_scores)
-        })
+    # Create and save results
+    results_df = create_results_dataframe(args.baseline_model, model_names, padded_scores, result, args.alpha)
+    scores_df = save_results(results_df, model_names, padded_scores, args.output_dir)
     
-    results_df = pd.DataFrame(results_list)
-    results_df.to_csv(csv_dir / "dunnett_test_results.csv", index=False)
-    print(f"Saved Dunnett's test results to {csv_dir / 'dunnett_test_results.csv'}")
+    # Print summary
+    print(f"\nProtein Language Model Evaluation Results:")
+    print("=" * 60)
+    for _, row in results_df.iterrows():
+        print(f"{row['finetuned_model']} vs {row['baseline_model']}:")
+        print(f"  Correlation improvement: {row['improvement']:+.4f}")
+        print(f"  Effect size (Cohen's d): {row['cohens_d']:.4f} ({row['effect_size']})")
+        print(f"  Statistical significance: p={row['p_value']:.4f} ({'significant' if row['significant'] else 'not significant'})")
     
-    # Print results
-    print("\nDunnett's Test Results:")
-    print("=====================")
-    for i, comp in enumerate(result.comparisons):
-        treatment_idx = comp[0]
-        treatment_name = model_names[treatment_idx]
-        print(f"{treatment_name} vs {args.control_model}:")
-        print(f"  Test statistic: {result.statistic[i]:.4f}")
-        print(f"  p-value: {result.pvalue[i]:.4f}")
-        significance = "significant" if result.pvalue[i] < args.alpha else "not significant"
-        print(f"  Result: {significance} (α={args.alpha})")
-    
-    # Save results to text file
-    with open(args.output_dir / "dunnett_results.txt", 'w') as f:
-        f.write("Dunnett's Test Results\n")
-        f.write("=====================\n\n")
-        f.write(f"Control model: {args.control_model}\n")
-        f.write(f"Control scores: {control_scores}\n\n")
-        
-        for i, comp in enumerate(result.comparisons):
-            treatment_idx = comp[0]
-            treatment_name = model_names[treatment_idx]
-            f.write(f"{treatment_name} vs {args.control_model}:\n")
-            f.write(f"  Treatment scores: {padded_scores[treatment_idx]}\n")
-            f.write(f"  Test statistic: {result.statistic[i]:.4f}\n")
-            f.write(f"  p-value: {result.pvalue[i]:.4f}\n")
-            significance = "significant" if result.pvalue[i] < args.alpha else "not significant"
-            f.write(f"  Result: {significance} (α={args.alpha})\n\n")
-    
-    print(f"\nResults saved to {args.output_dir / 'dunnett_results.txt'}")
-    
-    # Generate comparison plots if requested
+    # Generate plots if requested
     if args.plot:
-        plot_comparison(
-            args.control_model, 
-            args.treatment_models, 
-            result.statistic, 
-            result.pvalue, 
-            args.output_dir
-        )
+        plot_comparison(results_df, model_names, padded_scores, args.output_dir)
+        print(f"\nComprehensive plots saved to {args.output_dir}")
+    
+    print(f"\nResults saved to {args.output_dir}")
     
     return {
-        "comparisons": result.comparisons,
-        "statistic": result.statistic,
-        "pvalue": result.pvalue,
-        "model_names": model_names,
-        "results_df": results_df
+        "results_df": results_df,
+        "scores_df": scores_df,
+        "test_result": result
     }
 
 def main():
     args = parse_args()
-    run_dunnet(args)
+    run_dunnett(args)
 
 if __name__ == "__main__":
     main()

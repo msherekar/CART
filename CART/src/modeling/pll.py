@@ -16,14 +16,19 @@ import json
 import argparse
 import matplotlib.pyplot as plt
 import pandas as pd
+import gc
 
+# Import project utilities
+from pathlib import Path
+
+def get_pll_project_root() -> Path:
+    """Get the actual project root directory for PLL module."""
+    # From CART/src/modeling/pll.py, go up 3 levels to reach CART-Project root
+    return Path(__file__).parent.parent.parent.parent.resolve()
 
 
 def parse_args(args_list=None):
     parser = argparse.ArgumentParser(description="Compute pseudo-log-likelihoods for CAR-T sequences")
-    
-    # Get project root for relative paths
-    #project_root = Path(__file__).parent.parent.parent.resolve()
     
     # Required arguments with default paths
     parser.add_argument(
@@ -41,13 +46,13 @@ def parse_args(args_list=None):
     parser.add_argument(
         "--finetuned_high", 
         type=Path, 
-        default=Path('../../output/models/high'), 
+        default=Path('output/models/high'), 
         help="Path to high-diversity fine-tuned model"
     )
     parser.add_argument(
         "--finetuned_low", 
         type=Path, 
-        default=Path('../../output/models/low'), 
+        default=Path('output/models/low'), 
         help="Path to low-diversity fine-tuned model"
     )
     
@@ -60,18 +65,6 @@ def parse_args(args_list=None):
         help="Compute device to use"
     )
     parser.add_argument(
-        "--batch_size", 
-        type=int, 
-        default=4, 
-        help="Batch size for inference"
-    )
-    parser.add_argument(
-        "--save_interval", 
-        type=int, 
-        default=10, 
-        help="Save interval for checkpoints"
-    )
-    parser.add_argument(
         "--max_tokens", 
         type=int, 
         default=512, 
@@ -80,7 +73,7 @@ def parse_args(args_list=None):
     parser.add_argument(
         "--output_dir", 
         type=Path, 
-        default=Path('../../output/results'), 
+        default=Path('output/results'), 
         help="Directory to save results"
     )
     parser.add_argument(
@@ -89,10 +82,15 @@ def parse_args(args_list=None):
         help="Use a subset of sequences for testing"
     )
     parser.add_argument(
-        "--test_size", 
+        "--subset_size", 
         type=int, 
-        default=20, 
+        default=50, 
         help="Number of sequences to use for testing"
+    )
+    parser.add_argument(
+        "--resume", 
+        action="store_true", 
+        help="Resume from previous checkpoint if available"
     )
     
     # Only parse command line arguments if this module is run directly
@@ -102,126 +100,236 @@ def parse_args(args_list=None):
         # When imported, use the provided args_list or an empty list
         return parser.parse_args(args_list or [])
 
+
 def select_device(choice: str) -> torch.device:
+    """Select the best available device for computation with enhanced MPS support."""
     if choice == "auto":
         if torch.cuda.is_available():
-            return torch.device("cuda")
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
-    return torch.device(choice)
+            device = torch.device("cuda")
+            print(f"🚀 Using CUDA GPU: {torch.cuda.get_device_name()}")
+            print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+            return device
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+            print("🍎 Using Apple Metal Performance Shaders (MPS)")
+            print("   Optimized for Apple Silicon (M1/M2/M3)")
+            # Set MPS memory fraction to avoid OOM
+            try:
+                # Enable memory efficient attention for MPS
+                os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
+                print("   MPS memory optimization enabled")
+            except:
+                pass
+            return device
+        else:
+            device = torch.device("cpu")
+            print("💻 Using CPU (consider using MPS on Apple Silicon)")
+            return device
+    else:
+        device = torch.device(choice)
+        if choice == "mps":
+            print("🍎 Using Apple Metal Performance Shaders (MPS)")
+            print("   Manually selected MPS device")
+            # Set MPS optimizations
+            try:
+                os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
+                print("   MPS memory optimization enabled")
+            except:
+                pass
+        elif choice == "cuda":
+            print(f"🚀 Using CUDA GPU: {torch.cuda.get_device_name() if torch.cuda.is_available() else 'Unknown'}")
+        else:
+            print(f"💻 Using device: {choice}")
+        return device
 
-def compute_pll(sequence, model, tokenizer, device, max_tokens):
-    """Compute pseudo-log-likelihood for a single sequence - standard method"""
+
+def compute_pll_optimized(sequence, model, tokenizer, device, max_tokens):
+    """Compute pseudo-log-likelihood for a single sequence with MPS optimizations."""
     # Tokenize the sequence
-    enc = tokenizer(sequence,
-                   return_tensors="pt",
-                   truncation=True,
-                   padding=False,
-                   max_length=max_tokens)
+    enc = tokenizer(
+        sequence,
+        return_tensors="pt",
+        truncation=True,
+        padding=False,
+        max_length=max_tokens
+    )
     input_ids = enc.input_ids.to(device)
     attention_mask = enc.attention_mask.to(device)
     L = input_ids.size(1)
     
-    # For each position, mask & get log-prob of true token
-    log_probs = []
-    for i in range(L):
-        masked = input_ids.clone()
-        masked[0, i] = tokenizer.mask_token_id
-        with torch.no_grad():
-            outputs = model(input_ids=masked, attention_mask=attention_mask)
-            logits = outputs.logits
-        log_soft = torch.log_softmax(logits[0, i], dim=-1)
-        true_id = input_ids[0, i]
-        log_p = log_soft[true_id].item()
-        log_probs.append(log_p)
+    # Skip special tokens (CLS, SEP, etc.)
+    start_idx = 1 if tokenizer.cls_token_id is not None else 0
+    end_idx = L - 1 if tokenizer.sep_token_id is not None else L
     
-    return float(np.mean(log_probs))
+    log_probs = []
+    
+    # MPS-specific memory management
+    if device.type == "mps":
+        # Process in smaller chunks for MPS to avoid memory issues
+        chunk_size = min(50, end_idx - start_idx)  # Process max 50 positions at once
+    else:
+        chunk_size = end_idx - start_idx
+    
+    # Batch process multiple masked positions for efficiency
+    with torch.no_grad():
+        for chunk_start in range(start_idx, end_idx, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, end_idx)
+            
+            for i in range(chunk_start, chunk_end):
+                # Skip if it's already a special token
+                if input_ids[0, i] in [tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id]:
+                    continue
+                    
+                masked = input_ids.clone()
+                masked[0, i] = tokenizer.mask_token_id
+                
+                try:
+                    outputs = model(input_ids=masked, attention_mask=attention_mask)
+                    logits = outputs.logits
+                    
+                    log_soft = torch.log_softmax(logits[0, i], dim=-1)
+                    true_id = input_ids[0, i]
+                    log_p = log_soft[true_id].item()
+                    log_probs.append(log_p)
+                    
+                except RuntimeError as e:
+                    if "MPS" in str(e) or "out of memory" in str(e).lower():
+                        print(f"⚠️  MPS memory issue at position {i}, skipping...")
+                        continue
+                    else:
+                        raise e
+            
+            # Clear MPS cache after each chunk
+            if device.type == "mps":
+                try:
+                    torch.mps.empty_cache()
+                except:
+                    pass
+    
+    return float(np.mean(log_probs)) if log_probs else 0.0
 
-def save_results(results, model_name, seq_idx, total_count, output_dir):
-    """Save results to disk with progress information"""
+
+def load_model_and_tokenizer(model_path, device):
+    """Load model and tokenizer with MPS optimizations for Apple Silicon."""
+    try:
+        print(f"Loading model from {model_path}")
+        
+        # MPS-specific loading optimizations
+        if device.type == "mps":
+            print("🍎 Applying MPS optimizations...")
+            # Set environment variables for better MPS performance
+            os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+            
+        if os.path.exists(str(model_path)):
+            # Local model path
+            model = AutoModelForMaskedLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.float32 if device.type == "mps" else torch.float16,
+                low_cpu_mem_usage=True
+            )
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+        else:
+            # Hugging Face model
+            model = AutoModelForMaskedLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.float32 if device.type == "mps" else torch.float16,
+                low_cpu_mem_usage=True
+            )
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+        
+        # Move model to device with MPS considerations
+        if device.type == "mps":
+            print("   Moving model to MPS device...")
+            # For MPS, we need to be careful about memory
+            model = model.to(device)
+            # Force garbage collection after moving to MPS
+            gc.collect()
+        else:
+            model = model.to(device)
+            
+        model.eval()
+        
+        # Optimize model configuration
+        if hasattr(model.config, 'use_cache'):
+            model.config.use_cache = False
+            
+        # MPS-specific optimizations
+        if device.type == "mps":
+            # Enable gradient checkpointing to save memory
+            if hasattr(model, 'gradient_checkpointing_enable'):
+                model.gradient_checkpointing_enable()
+            print("   MPS model optimizations applied")
+            
+        print(f"✅ Model loaded successfully on {device}")
+        return model, tokenizer
+        
+    except Exception as e:
+        print(f"❌ Error loading model from {model_path}: {e}")
+        if device.type == "mps":
+            print("💡 Try using --device cpu if MPS causes issues")
+        return None, None
+
+
+def save_checkpoint(results, model_name, completed_idx, total_count, output_dir):
+    """Save progress checkpoint."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    output_file = output_dir / f"pll_results_{model_name}.npy"
-    progress_file = output_dir / f"progress_{model_name}.json"
-    
-    # Save numpy array with results
-    np.save(output_file, np.array(results))
-    
-    # Save progress information
-    progress = {
-        "model": model_name,
-        "completed": seq_idx,
+    checkpoint = {
+        "model_name": model_name,
+        "results": results,
+        "completed": completed_idx,
         "total": total_count,
-        "average_pll": float(np.mean(results)),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    with open(progress_file, "w") as f:
-        json.dump(progress, f, indent=2)
+    checkpoint_file = output_dir / f"checkpoint_{model_name}.json"
+    with open(checkpoint_file, "w") as f:
+        json.dump(checkpoint, f, indent=2)
     
-    print(f"[SAVE] Results saved: {seq_idx}/{total_count} sequences processed")
+    print(f"[CHECKPOINT] Saved progress: {completed_idx}/{total_count} sequences")
 
-def load_progress(model_name, total_sequences, output_dir):
-    """Load previous progress if available"""
-    output_dir = Path(output_dir)
-    output_file = output_dir / f"pll_results_{model_name}.npy"
-    progress_file = output_dir / f"progress_{model_name}.json"
+
+def load_checkpoint(model_name, output_dir):
+    """Load previous checkpoint if available."""
+    checkpoint_file = Path(output_dir) / f"checkpoint_{model_name}.json"
     
-    if os.path.exists(output_file) and os.path.exists(progress_file):
+    if checkpoint_file.exists():
         try:
-            # Load progress info
-            with open(progress_file, "r") as f:
-                progress = json.load(f)
+            with open(checkpoint_file, "r") as f:
+                checkpoint = json.load(f)
             
-            # Load saved results
-            results = np.load(output_file).tolist()
-            
-            # Verify count matches
-            if len(results) == progress["completed"]:
-                print(f"[INFO] Resuming from previous run: {len(results)}/{total_sequences} sequences already processed")
-                return results, progress["completed"]
-            else:
-                print(f"[WARNING] Inconsistent saved data. Starting fresh.")
+            print(f"[RESUME] Found checkpoint: {checkpoint['completed']}/{checkpoint['total']} sequences completed")
+            return checkpoint["results"], checkpoint["completed"]
         except Exception as e:
-            print(f"[WARNING] Error loading previous progress: {e}")
+            print(f"[WARNING] Error loading checkpoint: {e}")
     
-    # Start fresh
     return [], 0
 
-def plot_pll_results(results_dict, output_path):
-    """Plot bar graph comparing PLL scores across models and plot perplexity."""
-    plt.figure(figsize=(10, 6))
+
+def plot_pll_results(results_dict, output_dir):
+    """Create comprehensive PLL analysis plots."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Prepare data for plotting
     models = list(results_dict.keys())
     avg_plls = [np.nanmean(results_dict[model]) for model in models]
-    
-    # Compute perplexity for each model
     perplexities = [np.exp(-pll) for pll in avg_plls]
     
-    # Save PLL data as CSV for custom plotting
-    results_dir = Path(os.path.dirname(output_path))
-    csv_path = results_dir / "pll_scores.csv"
-    
-    # Create DataFrame for all sequence scores
+    # Save detailed results
     seq_data = {}
-    for model in models:
-        seq_data[model] = results_dict[model]
+    max_len = max(len(scores) for scores in results_dict.values())
     
-    # Ensure all columns have the same length by padding with NaN
-    max_len = max(len(scores) for scores in seq_data.values())
-    for model, scores in seq_data.items():
-        if len(scores) < max_len:
-            seq_data[model] = scores + [np.nan] * (max_len - len(scores))
+    for model, scores in results_dict.items():
+        # Pad with NaN to ensure equal length
+        padded_scores = scores + [np.nan] * (max_len - len(scores))
+        seq_data[model] = padded_scores
     
     # Save sequence-level scores
     seq_df = pd.DataFrame(seq_data)
-    seq_df.to_csv(csv_path, index=False)
-    print(f"[INFO] Sequence-level PLL scores saved to {csv_path}")
+    seq_df.to_csv(output_dir / "pll_scores.csv", index=False)
     
-    # Save summary statistics including perplexity
+    # Save summary statistics
     summary_df = pd.DataFrame({
         'model': models,
         'avg_pll': avg_plls,
@@ -229,118 +337,49 @@ def plot_pll_results(results_dict, output_path):
         'min_pll': [np.nanmin(results_dict[model]) for model in models],
         'max_pll': [np.nanmax(results_dict[model]) for model in models],
         'std_pll': [np.nanstd(results_dict[model]) for model in models],
+        'count': [len([x for x in results_dict[model] if not np.isnan(x)]) for model in models]
     })
-    summary_path = results_dir / "pll_summary.csv"
-    summary_df.to_csv(summary_path, index=False)
-    print(f"[INFO] PLL summary statistics (with perplexity) saved to {summary_path}")
+    summary_df.to_csv(output_dir / "pll_summary.csv", index=False)
     
-    # Create bar plot for PLL
-    bars = plt.bar(models, avg_plls, color=['skyblue', 'lightgreen', 'salmon'])
-    for bar in bars:
+    # Create comparison plots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # PLL scores
+    bars1 = ax1.bar(models, avg_plls, color=['skyblue', 'lightgreen', 'salmon'])
+    ax1.set_title('Average Pseudo-Log-Likelihood Scores')
+    ax1.set_ylabel('Average PLL Score')
+    ax1.grid(axis='y', alpha=0.3)
+    
+    for bar in bars1:
         height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.4f}',
-                ha='center', va='bottom')
-    plt.title('Average Pseudo-Log-Likelihood Scores by Model')
-    plt.ylabel('Average PLL Score')
-    plt.xlabel('Model')
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    plt.savefig(results_dir / 'pll_comparison.png', dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"[INFO] PLL plot saved to {results_dir / 'pll_comparison.png'}")
+        ax1.text(bar.get_x() + bar.get_width()/2., height,
+                f'{height:.4f}', ha='center', va='bottom')
     
-    # Create bar plot for Perplexity
-    plt.figure(figsize=(10, 6))
-    bars = plt.bar(models, perplexities, color=['skyblue', 'lightgreen', 'salmon'])
-    for bar in bars:
+    # Perplexity
+    bars2 = ax2.bar(models, perplexities, color=['skyblue', 'lightgreen', 'salmon'])
+    ax2.set_title('Perplexity (lower is better)')
+    ax2.set_ylabel('Perplexity')
+    ax2.grid(axis='y', alpha=0.3)
+    
+    for bar in bars2:
         height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.2f}',
-                ha='center', va='bottom')
-    plt.title('Perplexity by Model (lower is better)')
-    plt.ylabel('Perplexity')
-    plt.xlabel('Model')
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    plt.savefig(results_dir / 'perplexity_comparison.png', dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"[INFO] Perplexity plot saved to {results_dir / 'perplexity_comparison.png'}")
-
-def load_model_and_tokenizer(model_name, device):
-    """Load model and tokenizer based on model name"""
-    if model_name == "pretrained":
-        # Load ESM model from Hugging Face
-        model = AutoModelForMaskedLM.from_pretrained("facebook/esm2_t6_8M_UR50D")
-        tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D")
-    else:
-        # Load finetuned model
-        if model_name == "finetuned_high":
-            path = os.path.join(get_project_root(), "output", "models", "high")
-        elif model_name == "finetuned_low":
-            path = os.path.join(get_project_root(), "output", "models", "low")
-        else:
-            raise ValueError(f"Unknown model name: {model_name}")
-            
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Model checkpoint not found: {path}")
-            
-        print(f"Loading model from {path}")
-            
-        # Load the model directly using from_pretrained
-        model = AutoModelForMaskedLM.from_pretrained(path)
-        tokenizer = AutoTokenizer.from_pretrained(path)
+        ax2.text(bar.get_x() + bar.get_width()/2., height,
+                f'{height:.2f}', ha='center', va='bottom')
     
-    # Move model to device after loading
-    model = model.to(device)
-    return model, tokenizer
+    plt.tight_layout()
+    plt.savefig(output_dir / 'pll_comparison.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"[INFO] Results saved to {output_dir}")
 
-def compute_plls(sequences, model, tokenizer, device, batch_size, max_tokens):
-    """Compute pseudo-log-likelihoods for a batch of sequences."""
-    plls = []
-    for seq in sequences:
-        # Tokenize the sequence
-        enc = tokenizer(
-            seq,
-            return_tensors="pt",
-            truncation=True,
-            padding=False,
-            max_length=max_tokens
-        )
-        input_ids = enc.input_ids.to(device)
-        attention_mask = enc.attention_mask.to(device)
-        L = input_ids.size(1)
-        
-        # For each position, mask & get log-prob of true token
-        log_probs = []
-        for i in range(L):
-            masked = input_ids.clone()
-            masked[0, i] = tokenizer.mask_token_id
-            with torch.no_grad():
-                outputs = model(input_ids=masked, attention_mask=attention_mask)
-                logits = outputs.logits
-            log_soft = torch.log_softmax(logits[0, i], dim=-1)
-            true_id = input_ids[0, i]
-            log_p = log_soft[true_id].item()
-            log_probs.append(log_p)
-        
-        plls.append(float(np.mean(log_probs)))
-    return plls
 
 def run_pll(args):
-    root = Path(__file__).parent.parent.parent.parent.resolve()
-   # now resolve the FASTA path:
-    mutant_fasta = args.mutant_fasta
-    if not mutant_fasta.is_absolute():
-        mutant_fasta = root / mutant_fasta
-
-    # same for output_dir, finetuned_high, etc.
-    output_dir = args.output_dir
-    if not output_dir.is_absolute():
-        output_dir = root / output_dir
-
+    """Run optimized PLL computation pipeline."""
+    # Resolve paths using correct project root
+    root = get_pll_project_root()
+    mutant_fasta = args.mutant_fasta if args.mutant_fasta.is_absolute() else root / args.mutant_fasta
+    output_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
     
-    """Run PLL computation pipeline."""
     # Select device
     device = select_device(args.device)
     print(f"Using device: {device}")
@@ -351,74 +390,110 @@ def run_pll(args):
     for record in SeqIO.parse(mutant_fasta, "fasta"):
         sequences.append(str(record.seq))
         sequence_ids.append(record.id)
-    print(f"Loaded {len(sequences)} sequences from {mutant_fasta}")
     
-    # Process with each model
+    # Use subset if requested
+    if args.use_subset:
+        sequences = sequences[:args.subset_size]
+        sequence_ids = sequence_ids[:args.subset_size]
+        print(f"Using subset of {len(sequences)} sequences for testing")
+    else:
+        print(f"Processing {len(sequences)} sequences")
+    
+    # Model configurations
+    model_configs = {
+        'pretrained': args.pretrained,
+        'finetuned_high': args.finetuned_high,
+        'finetuned_low': args.finetuned_low
+    }
+    
     pll_results = {}
-    for model_name in ['pretrained', 'finetuned_high', 'finetuned_low']:
+    
+    for model_name, model_path in model_configs.items():
         print(f"\n[INFO] Processing with {model_name} model")
-        print(f"[INFO] Loading {model_name} model and tokenizer...")
         
+        # Load checkpoint if resuming
+        results, start_idx = ([], 0)
+        if args.resume:
+            results, start_idx = load_checkpoint(model_name, output_dir)
+        
+        if start_idx >= len(sequences):
+            print(f"[INFO] {model_name} already completed")
+            pll_results[model_name] = results
+            continue
+        
+        # Load model
+        model, tokenizer = load_model_and_tokenizer(model_path, device)
+        if model is None:
+            print(f"[ERROR] Failed to load {model_name}, skipping...")
+            continue
+        
+        # Process sequences
         try:
-            if model_name == 'pretrained':
-                model_path = args.pretrained
-                print(f"Loading pretrained model from {model_path}")
-            elif model_name == 'finetuned_high':
-                model_path = args.finetuned_high
-                print(f"Loading finetuned high-diversity model from {model_path}")
-            else:
-                model_path = args.finetuned_low
-                print(f"Loading finetuned low-diversity model from {model_path}")
-            if os.path.exists(model_path):
-                print(f"Loading model from {model_path}")
-                # Load the model directly using from_pretrained
-                model = AutoModelForMaskedLM.from_pretrained(model_path)
-                tokenizer = AutoTokenizer.from_pretrained(model_path)
-            else:
-                print(f"Loading model from Hugging Face Hub: {model_path}")
-                model = AutoModelForMaskedLM.from_pretrained(model_path)
-                tokenizer = AutoTokenizer.from_pretrained(model_path)
+            for i in tqdm(range(start_idx, len(sequences)), 
+                         desc=f"Computing PLL for {model_name}",
+                         initial=start_idx, total=len(sequences)):
+                
+                pll = compute_pll_optimized(
+                    sequences[i], model, tokenizer, device, args.max_tokens
+                )
+                results.append(pll)
+                
+                # Save checkpoint every 50 sequences
+                if (i + 1) % 50 == 0:
+                    save_checkpoint(results, model_name, i + 1, len(sequences), output_dir)
             
-            model = model.to(device)
-            model.eval()
+            pll_results[model_name] = results
             
-            # Compute PLLs using the existing compute_pll function
-            plls = []
-            for seq in tqdm(sequences, desc=f"Computing PLL for {model_name}"):
-                pll = compute_pll(seq, model, tokenizer, device, args.max_tokens)
-                plls.append(pll)
+            # Save final results
+            output_path = output_dir / f"{model_name}_pll.npy"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            np.save(output_path, results)
             
-            pll_results[model_name] = plls
-            
-            # Save results as numpy array
-            output_path = os.path.join(args.output_dir, f"{model_name}_pll.npy")
-            os.makedirs(args.output_dir, exist_ok=True)
-            np.save(output_path, plls)
-            print(f"Saved PLL results to {output_path}")
-            
-            # Save results as CSV with sequence IDs
-            csv_path = os.path.join(args.output_dir, f"{model_name}_pll.csv")
+            # Save as CSV
+            csv_path = output_dir / f"{model_name}_pll.csv"
             pll_df = pd.DataFrame({
-                'sequence_id': sequence_ids,
-                'pll_score': plls
+                'sequence_id': sequence_ids[:len(results)],
+                'pll_score': results
             })
             pll_df.to_csv(csv_path, index=False)
-            print(f"Saved PLL results as CSV to {csv_path}")
+            
+            print(f"[INFO] Saved {model_name} results: {len(results)} sequences")
             
         except Exception as e:
-            print(f"Warning: Could not load model with CPU map_location: {str(e)}")
-            print(f"Error loading model: {str(e)}")
-            print(f"Error processing {model_name}: {str(e)}")
+            print(f"[ERROR] Error processing {model_name}: {e}")
             continue
+        finally:
+            # Enhanced memory cleanup with MPS support
+            print(f"🧹 Cleaning up memory for {model_name}...")
+            del model, tokenizer
+            
+            # Device-specific memory cleanup
+            if device.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print("   CUDA cache cleared")
+            elif device.type == "mps":
+                try:
+                    torch.mps.empty_cache()
+                    print("   MPS cache cleared")
+                except:
+                    pass
+            
+            # Force garbage collection
+            gc.collect()
+            print("   Garbage collection completed")
     
-    # Plot comparison if we have results
+    # Generate comparison plots
     if pll_results:
-        plot_path = root / 'output' / 'results' / 'pll_comparison.png'
-        plot_pll_results(pll_results, plot_path)
+        plot_pll_results(pll_results, output_dir)
+        print(f"\n[SUCCESS] PLL analysis completed. Results saved to {output_dir}")
+    else:
+        print("[ERROR] No results generated")
+
 
 def main():
     args = parse_args()
     run_pll(args)
+
 
 if __name__ == "__main__":
     main()
