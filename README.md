@@ -39,13 +39,6 @@ A system for predicting CAR-T cell activity by fine-tuning ESM-2 protein languag
 
 **Abstract Summary**: The original work developed a computational framework to predict CAR-T cell activity by fine-tuning ESM-2 with CAR sequences generated using sequence augmentation. The study addressed the challenge of applying protein language models to artificial CAR constructs by creating training data through recombining homologous CAR domains. Experimental validation showed that fine-tuned ESM-2 significantly improves prediction performance, with training parameters like sequence diversity, training steps, and model size substantially influencing results.
 
-
-## Results
-Following 
-1.) My implementation successfully reproduces the figures of the paper.
-2.) A simple webinterface
-
-
 ### Training Parameter Analysis
 
 The framework enables systematic analysis of key training parameters identified in the original paper:
