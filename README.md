@@ -88,12 +88,14 @@ The framework enables systematic analysis of key training parameters identified 
 git clone https://github.com/msherekar/CART.git
 cd CART
 
-# Install the package
-pip install -e .
-
 # Virtual Environment
 conda env create --file environment.yml
 conda activate finetune
+
+# Install the package
+pip install -e .
+
+
 
 ```
 ## Usage
