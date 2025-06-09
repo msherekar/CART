@@ -21,11 +21,11 @@ A system for predicting CAR-T cell activity by fine-tuning ESM-2 protein languag
 
 **2.)** Developed a web-based interface to allow scientists to experiment with different CAR sequences, fine-tune models, assess the effect of training parameters, and visualize sequence diversity.
 
-**3.)** Integrated the ability to run experiments from a module or a Docker container (with HMMER omitted due to >100GB size).
+**3.)** Integrated the ability to run experiments from a module 
 
 **Utility**: This system will enable researchers to develop personalized CAR constructs by providing a prediction mechanism for new mutations. The only inputs required are a wild-type CAR sequence, a set of mutants, their experimental cytotoxicity values, and access to a local UniProt(Trembl) database.
 
-**Limitations**: Due to the size of HMMER UniProt database, full containerized end-to-end deployment is not included. I have provided the necessary code (see later) for dockerizing the model and deploying it on dockerhub. Users must locally manage this part of the pipeline.
+**Limitations**: Due to the size of HMMER UniProt database, full containerized end-to-end deployment is not included. Dockerizing the model and deploying it on dockerhub is possible later.
 
 **Learning Outcomes**: Through this project, I learnt masked language modeling (MLM), protein representation learning, model evaluation metrics (e.g., Spearman, Recall@K), and the role of sequence diversity and model size in fine-tuning performance.
 
@@ -280,23 +280,11 @@ Available steps: `augmentation`, `mds`, `mutants`, `finetuning`, `embeddings`, `
 ## Dependencies
 Refer to the environment.yml file
 
-## Deployment
-
-### Docker Support
-The system supports containerized deployment for reproducible environments:
-
-```bash
-# Build Docker image
-docker build -t cart-project .
-
-# Run in container
-docker run -v $(pwd)/data:/app/data cart-project python run_experiments.py --experiment all
-```
 
 ### Production Deployment
 - The main entry point `run_experiments.py` handles all path resolution relative to the project root
 - Suitable for cloud deployment (AWS, GCP, Azure)
-- Supports both CPU and GPU environments
+- Supports both CPU and GPU environments (Windows users will have make necessary adjustment to the code)
 - Environment variables can be used for configuration
 
 ## Reproducibility
