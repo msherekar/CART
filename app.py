@@ -9,14 +9,7 @@ from pathlib import Path
 from CART.src.main import run_pipeline
 import base64
 
-# --- Demo/example data (small files bundled with repo) ---
-DEMO_FASTA_1 = "fasta/demo_cd28.fasta"
-DEMO_FASTA_2 = "fasta/demo_cd3z.fasta"
-DEMO_CAR = "fasta/demo_car.fasta"
-DEMO_CYTOX = "fasta/demo_cytotox.csv"
-DEMO_UNIPROT = "fasta/demo_uniprot.fasta"  # Should be a tiny file for demo
-
-# --- Default project paths ---
+ # --- Default project paths ---
 DEFAULT_CD28_PATH = "/Users/mukulsherekar/pythonProject/CART-Project/fasta/cd28.fasta"
 DEFAULT_CD3Z_PATH = "/Users/mukulsherekar/pythonProject/CART-Project/fasta/cd3z.fasta"
 DEFAULT_CAR_PATH = "/Users/mukulsherekar/pythonProject/CART-Project/fasta/scFV_FMC63.fasta"
@@ -93,8 +86,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # App mode selection
-st.sidebar.header("CART Project")
-app_mode = st.sidebar.radio("Select Mode", ["Run Pipeline", "View Results"])
+
+app_mode = st.sidebar.radio("", ["Run Pipeline", "View Results"])
 
 # Helper functions for result visualization
 def display_image(image_path, caption="", width=None):
@@ -203,59 +196,78 @@ warnings.filterwarnings("ignore", message=".*torch\._classes.*")
 
 # PIPELINE MODE
 if app_mode == "Run Pipeline":
-    st.markdown('<div class="main-header">CAR Cytotoxicity Prediction Pipeline</div>', unsafe_allow_html=True)
-    st.markdown("""
-    Upload your files, select models and parameters, and run the full CAR-T pipeline with a single click!
-    """)
+    st.markdown('<div class="main-header">CAR-T Cytotoxicity Prediction Pipeline</div>', unsafe_allow_html=True)
+
 
     # --- Sidebar: File Uploads and Options ---
-    st.sidebar.header("1. Upload Files or Use Project Files")
-    
-    use_demo = st.sidebar.button("Use Example Data (Demo)")
+    st.sidebar.header("1. File Uploads")
+
     use_default = st.sidebar.checkbox("Use Default Project Files", value=st.session_state.use_default_files)
     st.session_state.use_default_files = use_default
-    
-    # Helper function to manage file sources
-    def get_file_path(default_path, demo_path, uploaded_file, label):
-        if use_default and os.path.exists(default_path):
-            st.sidebar.success(f"Using default {label}: {os.path.basename(default_path)}")
-            return default_path, None
-        elif use_demo and demo_path:
-            return demo_path, None
-        else:
-            uploaded = st.sidebar.file_uploader(label, type=["fasta", "fa", "txt", "csv"], key=label.lower().replace(" ", "_"))
-            if uploaded:
-                return None, uploaded
-            elif use_default:  # If default was selected but file doesn't exist
-                st.sidebar.warning(f"Default {label} not found at: {default_path}")
-                return None, None
-            else:
-                return None, None
-    
-    # Get paths for each required file
-    domain_1_path, domain_1_file = get_file_path(DEFAULT_CD28_PATH, DEMO_FASTA_1, None, "CD28 FASTA")
-    domain_2_path, domain_2_file = get_file_path(DEFAULT_CD3Z_PATH, DEMO_FASTA_2, None, "CD3Z FASTA")
-    car_path, car_file = get_file_path(DEFAULT_CAR_PATH, DEMO_CAR, None, "CAR FASTA (optional)")
-    cytotox_path, cytotox_file = get_file_path(DEFAULT_CYTOX_PATH, DEMO_CYTOX, None, "Cytotoxicity CSV")
 
-    # Uniprot DB: allow upload, local path, or default
-    st.sidebar.markdown("**Uniprot DB (large file):**")
-    uniprot_file = None  # Initialize variable to avoid NameError
-    if use_default and os.path.exists(DEFAULT_UNIPROT_PATH):
-        st.sidebar.success(f"Using default Uniprot DB: {os.path.basename(DEFAULT_UNIPROT_PATH)}")
-        uniprot_path = DEFAULT_UNIPROT_PATH
-    elif use_demo:
-        uniprot_path = DEMO_UNIPROT
+    # File upload sections
+    if use_default:
+        # Check if default files exist and show status
+        st.sidebar.header("Default Files Status:")
+        if os.path.exists(DEFAULT_CD28_PATH):
+            st.sidebar.success(f"✓ CD28: {os.path.basename(DEFAULT_CD28_PATH)}")
+            domain_1_path = DEFAULT_CD28_PATH
+            domain_1_file = None
+        else:
+            st.sidebar.error(f"✗ CD28 not found: {DEFAULT_CD28_PATH}")
+            domain_1_path = None
+            domain_1_file = None
+        
+        if os.path.exists(DEFAULT_CD3Z_PATH):
+            st.sidebar.success(f"✓ CD3Z: {os.path.basename(DEFAULT_CD3Z_PATH)}")
+            domain_2_path = DEFAULT_CD3Z_PATH
+            domain_2_file = None
+        else:
+            st.sidebar.error(f"✗ CD3Z not found: {DEFAULT_CD3Z_PATH}")
+            domain_2_path = None
+            domain_2_file = None
+        
+        if os.path.exists(DEFAULT_CAR_PATH):
+            st.sidebar.success(f"✓ CAR: {os.path.basename(DEFAULT_CAR_PATH)}")
+            car_path = DEFAULT_CAR_PATH
+            car_file = None
+        else:
+            st.sidebar.warning(f"? CAR not found: {DEFAULT_CAR_PATH}")
+            car_path = None
+            car_file = None
+        
+        if os.path.exists(DEFAULT_CYTOX_PATH):
+            st.sidebar.success(f"✓ Cytotoxicity: {os.path.basename(DEFAULT_CYTOX_PATH)}")
+            cytotox_path = DEFAULT_CYTOX_PATH
+            cytotox_file = None
+        else:
+            st.sidebar.error(f"✗ Cytotoxicity not found: {DEFAULT_CYTOX_PATH}")
+            cytotox_path = None
+            cytotox_file = None
+        
+        if os.path.exists(DEFAULT_UNIPROT_PATH):
+            st.sidebar.success(f"✓ Uniprot: {os.path.basename(DEFAULT_UNIPROT_PATH)}")
+            uniprot_path = DEFAULT_UNIPROT_PATH
+            uniprot_file = None
+        else:
+            st.sidebar.error(f"✗ Uniprot not found: {DEFAULT_UNIPROT_PATH}")
+            uniprot_path = None
+            uniprot_file = None
     else:
-        uniprot_file = st.sidebar.file_uploader("Upload Uniprot DB (FASTA, >100GB not recommended)", type=["fasta", "fa", "txt"], key="uniprot")
-        uniprot_local = st.sidebar.text_input("Or enter local path to Uniprot DB:")
+        # Manual file uploads
+        
+        domain_1_file = st.sidebar.file_uploader("CD28 FASTA", type=["fasta", "fa", "txt"], key="cd28_upload")
+        domain_2_file = st.sidebar.file_uploader("CD3Z FASTA", type=["fasta", "fa", "txt"], key="cd3z_upload")
+        car_file = st.sidebar.file_uploader("CAR FASTA (optional)", type=["fasta", "fa", "txt"], key="car_upload")
+        cytotox_file = st.sidebar.file_uploader("Cytotoxicity CSV", type=["csv"], key="cytotox_upload")
+        uniprot_file = st.sidebar.file_uploader("Uniprot Database FASTA", type=["fasta", "fa", "txt"], key="uniprot_upload")
+        
+        # Set path variables to None when using uploads
+        domain_1_path = None
+        domain_2_path = None
+        car_path = None
+        cytotox_path = None
         uniprot_path = None
-        if uniprot_file:
-            uniprot_path = None  # Will be handled in temp dir
-        elif uniprot_local:
-            uniprot_path = uniprot_local
-        elif use_default:  # If default was selected but file doesn't exist
-            st.sidebar.warning(f"Default Uniprot DB not found at: {DEFAULT_UNIPROT_PATH}")
 
     st.sidebar.header("2. Model and Parameters")
     model_choice = st.sidebar.selectbox("ESM Model", list(ESM_MODELS.keys()), format_func=lambda x: f"{x} - {ESM_MODELS[x]}")
@@ -278,7 +290,7 @@ if app_mode == "Run Pipeline":
     run_button = st.sidebar.button("Run Pipeline 🚀")
 
     # --- Main Area: Progress, Logs, Results ---
-    if run_button or use_demo:
+    if run_button:
         st.subheader("Pipeline Progress and Results")
         with st.spinner("Preparing files and running pipeline..."):
             # Use a temp dir for uploads
@@ -301,9 +313,7 @@ if app_mode == "Run Pipeline":
                 cytotox_csv = save_file(cytotox_file, cytotox_path, "cytotox.csv")
                 
                 # Uniprot DB
-                if use_demo:
-                    uniprot_db = DEMO_UNIPROT
-                elif uniprot_file is not None:
+                if uniprot_file is not None:
                     uniprot_db = save_file(uniprot_file, None, "uniprot.fasta")
                 else:
                     uniprot_db = uniprot_path
@@ -409,7 +419,7 @@ if app_mode == "Run Pipeline":
         st.success("Pipeline was previously run. You can rerun with different parameters from the sidebar.")
         st.info(f"Results are available in: {st.session_state.output_dir}")
     else:
-        st.info("Upload your files, use default project files, or use demo data, then click 'Run Pipeline' in the sidebar.")
+        st.info("")
 
 # RESULTS VISUALIZATION MODE
 else:
@@ -436,8 +446,6 @@ else:
         st.markdown('<div class="category-header">Project Overview</div>', unsafe_allow_html=True)
         
         st.write("""
-        This dashboard presents the results from the CART (CAR-T cell) analysis project. 
-        Navigate through the tabs to explore different aspects of the analysis:
         
         - **Embeddings & MDS**: Visualizations of sequence embeddings and multi-dimensional scaling
         - **Model Evaluation**: Confusion matrices and performance metrics for different model variants
