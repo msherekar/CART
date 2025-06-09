@@ -1,12 +1,12 @@
 # CAR-T Cell Activity Prediction System
 
-A computational framework for predicting CAR-T cell activity by fine-tuning ESM-2 protein language models with sequence augmentation. This project implements the methodology from *[Enhancing CAR-T cell activity prediction via fine-tuning protein language models with generated CAR sequences](https://www.biorxiv.org/content/10.1101/2025.03.27.645831v1.full)* and provides both research-grade experiment tools and a user-friendly web interface.
+A system for predicting CAR-T cell activity by fine-tuning ESM-2 protein language models with sequence augmentation. This project implements the methodology from *[Enhancing CAR-T cell activity prediction via fine-tuning protein language models with generated CAR sequences](https://www.biorxiv.org/content/10.1101/2025.03.27.645831v1.full)* and provides both research-grade experiment tools and a user-friendly web interface.
 
-**My Motivation**: The original paper proposing this framework did not release any source code, making this a challenging and rewarding exercise in protein machine learning and software engineering. It was also an opportunity to design an end-to-end AI system that could help biologists and immunologists apply machine learning to their own CAR constructs.
+**Motivation**: The original paper proposing this framework did not release any source code, making this a challenging and rewarding exercise in protein machine learning and software engineering. It was also an opportunity to design an end-to-end AI system that could help biologists and immunologists apply machine learning to their own CAR constructs.
 
 *Note*: The aim was not to reproduce the exact results from the paper because the authors have not provided the cytotoxicity data. However, I have successfully implemented their methodology so that **any researcher can plug in their own CAR sequences and cytotoxicity data** to train and evaluate a prediction model tailored to their CAR-T constructs.
 
-**Problem**: CAR (Chimeric Antigen Receptor) is a synthetic protein introduced into T cells to direct their activity against cancer. While CAR-T therapies have revolutionized the treatment of certain cancers, their efficacy remains inconsistent, especially for solid tumors. Designing better CARs is limited by two major challenges:
+**Problem**: CAR (Chimeric Antigen Receptor) is a synthetic protein introduced into T cells to direct their activity against cancer. Designing better CARs is limited by two major challenges:
 
   **1.)** The artificial nature of CARs means there's a lack of evolutionary information—standard pretraining approaches like evotuning don't apply.
   
@@ -27,7 +27,7 @@ A computational framework for predicting CAR-T cell activity by fine-tuning ESM-
 
 **Limitations**: Due to the size of HMMER UniProt database, full containerized end-to-end deployment is not included. I have provided the necessary code (see later) for dockerizing the model and deploying it on dockerhub. Users must locally manage this part of the pipeline.
 
-**Learning Outcomes**: Through this project, I gained deeper knowledge of masked language modeling (MLM), protein representation learning, model evaluation metrics (e.g., Spearman, Recall@K), and the role of sequence diversity and model size in fine-tuning performance.
+**Learning Outcomes**: Through this project, I learnt masked language modeling (MLM), protein representation learning, model evaluation metrics (e.g., Spearman, Recall@K), and the role of sequence diversity and model size in fine-tuning performance.
 
 ## Original Paper
 
@@ -41,12 +41,10 @@ A computational framework for predicting CAR-T cell activity by fine-tuning ESM-
 
 
 ## Results
+Following 
+1.) My implementation successfully reproduces the figures of the paper.
+2.) A simple webinterface
 
-My implementation successfully reproduces the methodology:
-1. Fine-tuned ESM-2 significantly improves CAR-T activity prediction compared to baseline models
-2. Sequence diversity in training data substantially affects model performance
-3. Larger ESM-2 models generally achieve better prediction accuracy
-4. The number of training steps influences convergence and final performance
 
 ### Training Parameter Analysis
 
@@ -91,7 +89,7 @@ The framework enables systematic analysis of key training parameters identified 
 
 ## Installation
 
-### Option 1: Package Installation (Recommended for Pipeline)
+### Package Installation (Recommended for Pipeline)
 ```bash
 # Clone the repository
 git clone https://github.com/msherekar/CART-Project.git
@@ -99,22 +97,10 @@ cd CART-Project
 
 # Install the package
 pip install -e .
+
+# Virtual Environment
+conda install environment.yml
 ```
-
-### Option 2: Development Installation (For Experiments)
-```bash
-# Clone the repository
-git clone https://github.com/msherekar/CART-Project.git
-cd CART-Project
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
 ## Usage
 
 ### Streamlit Web Application
@@ -122,6 +108,7 @@ pip install -r requirements.txt
 Launch the interactive web interface for easy pipeline usage:
 
 ```bash
+cd CAR-Project
 streamlit run app.py
 ```
 
