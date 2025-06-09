@@ -85,8 +85,8 @@ The framework enables systematic analysis of key training parameters identified 
 ### Package Installation (Recommended for Pipeline)
 ```bash
 # Clone the repository
-git clone https://github.com/msherekar/CART-Project.git
-cd CART-Project
+git clone https://github.com/msherekar/CART.git
+cd CART
 
 # Install the package
 pip install -e .
