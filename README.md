@@ -94,9 +94,6 @@ conda activate finetune
 
 # Install the package
 pip install -e .
-
-
-
 ```
 ## Usage
 
