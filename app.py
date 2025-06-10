@@ -258,16 +258,23 @@ if app_mode == "Run Pipeline":
         
         domain_1_file = st.sidebar.file_uploader("CD28 FASTA", type=["fasta", "fa", "txt"], key="cd28_upload")
         domain_2_file = st.sidebar.file_uploader("CD3Z FASTA", type=["fasta", "fa", "txt"], key="cd3z_upload")
-        car_file = st.sidebar.file_uploader("CAR FASTA (optional)", type=["fasta", "fa", "txt"], key="car_upload")
+        car_file = st.sidebar.file_uploader("CAR FASTA", type=["fasta", "fa", "txt"], key="car_upload")
         cytotox_file = st.sidebar.file_uploader("Cytotoxicity CSV", type=["csv"], key="cytotox_upload")
-        uniprot_file = st.sidebar.file_uploader("Uniprot Database FASTA", type=["fasta", "fa", "txt"], key="uniprot_upload")
+        uniprot_file = st.sidebar.text_input("Uniprot Database FASTA Path", key="uniprot_upload")
         
-        # Set path variables to None when using uploads
+        # Show validation status for uniprot path
+        if uniprot_file and uniprot_file.strip():
+            if os.path.exists(uniprot_file.strip()):
+                st.sidebar.success(f"✓ Uniprot file found: {os.path.basename(uniprot_file.strip())}")
+            else:
+                st.sidebar.error(f"✗ Uniprot file not found: {uniprot_file.strip()}")
+        
+        # Set path variables to None when using uploads (except uniprot which is now a path input)
         domain_1_path = None
         domain_2_path = None
         car_path = None
         cytotox_path = None
-        uniprot_path = None
+        uniprot_path = uniprot_file if uniprot_file else None
 
     st.sidebar.header("2. Model and Parameters")
     model_choice = st.sidebar.selectbox("ESM Model", list(ESM_MODELS.keys()), format_func=lambda x: f"{x} - {ESM_MODELS[x]}")
@@ -312,11 +319,18 @@ if app_mode == "Run Pipeline":
                 wt_car = save_file(car_file, car_path, "car.fasta")
                 cytotox_csv = save_file(cytotox_file, cytotox_path, "cytotox.csv")
                 
-                # Uniprot DB
-                if uniprot_file is not None:
-                    uniprot_db = save_file(uniprot_file, None, "uniprot.fasta")
-                else:
+                # Uniprot DB - now handles path input instead of file upload
+                if uniprot_file and uniprot_file.strip():
+                    # uniprot_file is now a path string, not an uploaded file
+                    uniprot_db = uniprot_file.strip()
+                    # Validate that the path exists
+                    if not os.path.exists(uniprot_db):
+                        st.error(f"Uniprot database file not found: {uniprot_db}")
+                        uniprot_db = None
+                elif uniprot_path:
                     uniprot_db = uniprot_path
+                else:
+                    uniprot_db = None
                 
                 # Validate
                 missing = []
